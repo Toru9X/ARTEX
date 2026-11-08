@@ -57,6 +57,10 @@ export default function SystemSettingsPage() {
   const [testing, setTesting] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
   const [browserScreenshot, setBrowserScreenshot] = React.useState(false);
+  const [deepSeekSearchKey, setDeepSeekSearchKey] = React.useState("");
+  const [deepSeekSearchBaseURL, setDeepSeekSearchBaseURL] = React.useState("");
+  const [deepSeekSearchModel, setDeepSeekSearchModel] = React.useState("");
+  const [deepSeekKeySet, setDeepSeekKeySet] = React.useState(false);
   const [browserScreenshotTimestamp, setBrowserScreenshotTimestamp] = React.useState(false);
   const [intelligenceEnabled, setIntelligenceEnabled] = React.useState(false);
   const [credentialAgent, setCredentialAgent] = React.useState(false);
@@ -112,6 +116,10 @@ export default function SystemSettingsPage() {
     setOpsecEnabled(!!s.opsec_enabled);
     setProbeUrlInput(s.egress_probe_url ?? "");
     setBrowserScreenshot(!!s.browser_screenshot_enabled);
+    setDeepSeekKeySet(!!s.deepseek_search_key_set);
+    setDeepSeekSearchBaseURL(s.deepseek_search_base_url ?? "");
+    setDeepSeekSearchModel(s.deepseek_search_model ?? "");
+    setDeepSeekSearchKey("");
     setBrowserScreenshotTimestamp(!!s.browser_screenshot_timestamp_enabled);
     setIntelligenceEnabled(!!s.task_intelligence_enabled);
     setCredentialAgent(!!s.credential_agent_enabled);
@@ -916,6 +924,47 @@ export default function SystemSettingsPage() {
                   Verify these conditions yourself; the system does not block on them. Use the "Test search" button
                   below to run a real search and check.
                 </p>
+                <div className="flex flex-col gap-2 border-t pt-3">
+                  <Label htmlFor="deepseek-search-key" className="text-sm font-normal text-muted-foreground">
+                    Dedicated DeepSeek credentials — leave a field empty to use the active LLM profile for it
+                  </Label>
+                  <Input
+                    id="deepseek-search-key"
+                    type="password"
+                    autoComplete="off"
+                    value={deepSeekSearchKey}
+                    placeholder={
+                      deepSeekKeySet ? "stored; leave empty to keep it" : "API key (empty = use the active LLM profile)"
+                    }
+                    onChange={(e) => setDeepSeekSearchKey(e.target.value)}
+                  />
+                  <Input
+                    id="deepseek-search-base-url"
+                    value={deepSeekSearchBaseURL}
+                    placeholder="base URL (empty = use the active LLM profile)"
+                    onChange={(e) => setDeepSeekSearchBaseURL(e.target.value)}
+                  />
+                  <Input
+                    id="deepseek-search-model"
+                    value={deepSeekSearchModel}
+                    placeholder="model (empty = use the active LLM profile)"
+                    onChange={(e) => setDeepSeekSearchModel(e.target.value)}
+                  />
+                  <Button
+                    size="sm"
+                    className="self-start"
+                    disabled={saving}
+                    onClick={() =>
+                      saveWebSearch({
+                        deepseek_search_api_key: deepSeekSearchKey,
+                        deepseek_search_base_url: deepSeekSearchBaseURL,
+                        deepseek_search_model: deepSeekSearchModel,
+                      })
+                    }
+                  >
+                    Save DeepSeek credentials
+                  </Button>
+                </div>
               </div>
             )}
 

@@ -945,6 +945,12 @@ export interface Settings {
   // write-only: only sent on PUT to store/clear the key.
   brave_search_api_key?: string;
   tavily_search_api_key?: string;
+  // Dedicated DeepSeek search credentials. Any field left empty falls back to
+  // the active LLM profile; the key itself is never returned, only its presence.
+  deepseek_search_key_set?: boolean;
+  deepseek_search_base_url?: string;
+  deepseek_search_model?: string;
+  deepseek_search_api_key?: string; // write-only: sent on PUT to store or clear the key
   // Dedicated egress proxy (http/https/socks5) for reaching search endpoints; unrelated to the MITM proxy that records traffic. Empty = direct.
   web_search_proxy?: string;
   // Global egress proxy (http/https/socks5, may carry user:pass) that all target traffic goes

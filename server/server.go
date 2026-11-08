@@ -3629,19 +3629,25 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) settingsPayload() map[string]any {
 	on, backend, braveKey, tavilyKey, proxy := s.m.WebSearch()
+	dsBase, dsKey, dsModel := s.m.deepSeekSearchOverride()
 	pyStored, _, _ := s.m.pg.GetSetting(settingPythonInterp)
 	concOn, concLimit := s.m.ConcurrencyLimit()
 	if concLimit == 0 {
 		concLimit = defaultConcurrencyLimit // when off, still echo a sane default to the UI
 	}
 	return map[string]any{
-		"traffic_capture":          s.m.TrafficEnabled(),
-		"agent_traffic_binding":    s.m.pg.GetBool(settingAgentTrafficBinding, false),
-		"llm_record":               s.m.LLMRecordEnabled(),
-		"web_search_enabled":       on,
-		"web_search_backend":       backend,
-		"brave_key_set":            strings.TrimSpace(braveKey) != "",
-		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
+		"traffic_capture":       s.m.TrafficEnabled(),
+		"agent_traffic_binding": s.m.pg.GetBool(settingAgentTrafficBinding, false),
+		"llm_record":            s.m.LLMRecordEnabled(),
+		"web_search_enabled":    on,
+		"web_search_backend":    backend,
+		"brave_key_set":         strings.TrimSpace(braveKey) != "",
+		"tavily_key_set":        strings.TrimSpace(tavilyKey) != "",
+		// Dedicated DeepSeek search credentials; empty means the backend borrows
+		// the active LLM profile. The key itself is never returned.
+		"deepseek_search_key_set":  dsKey != "",
+		"deepseek_search_base_url": dsBase,
+		"deepseek_search_model":    dsModel,
 		"web_search_proxy":         proxy,                       // dedicated egress proxy (http/https/socks5), empty = direct
 		"global_proxy":             s.m.GlobalProxy(),           // global egress proxy (http/https/socks5), all target traffic goes through it, empty = direct
 		"python_interpreter":       strings.TrimSpace(pyStored), // user/auto-set value (empty = use runtime detection)
@@ -3755,10 +3761,15 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		WebSearchBackend *string `json:"web_search_backend"`
 		BraveKey         *string `json:"brave_search_api_key"`
 		TavilyKey        *string `json:"tavily_search_api_key"`
-		WebSearchProxy   *string `json:"web_search_proxy"`   // dedicated egress proxy (http/https/socks5); null = keep, "" = clear
-		GlobalProxy      *string `json:"global_proxy"`       // global egress proxy (http/https/socks5); null = keep, "" = clear (direct)
-		PythonInterp     *string `json:"python_interpreter"` // python interpreter path for the custom script tool
-		Workers          *int    `json:"workers"`            // number of concurrent worker agents (>0); applies to tasks started afterwards
+		// Dedicated DeepSeek search credentials; null = keep, "" = clear (fall
+		// back to the active LLM profile for that field).
+		DeepSeekSearchKey     *string `json:"deepseek_search_api_key"`
+		DeepSeekSearchBaseURL *string `json:"deepseek_search_base_url"`
+		DeepSeekSearchModel   *string `json:"deepseek_search_model"`
+		WebSearchProxy        *string `json:"web_search_proxy"`   // dedicated egress proxy (http/https/socks5); null = keep, "" = clear
+		GlobalProxy           *string `json:"global_proxy"`       // global egress proxy (http/https/socks5); null = keep, "" = clear (direct)
+		PythonInterp          *string `json:"python_interpreter"` // python interpreter path for the custom script tool
+		Workers               *int    `json:"workers"`            // number of concurrent worker agents (>0); applies to tasks started afterwards
 		// task concurrency cap: max simultaneously "running" tasks. Off = unlimited; on, new tasks beyond the cap queue and start automatically as slots free up.
 		ConcurrencyEnabled *bool `json:"task_concurrency_enabled"`
 		ConcurrencyLimit   *int  `json:"task_concurrency_limit"`
@@ -4057,6 +4068,20 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		changed = true // capture-off egress is baked into agents at build time → rebuild
+	}
+	for key, val := range map[string]*string{
+		settingDeepSeekSearchKey:     req.DeepSeekSearchKey,
+		settingDeepSeekSearchBaseURL: req.DeepSeekSearchBaseURL,
+		settingDeepSeekSearchModel:   req.DeepSeekSearchModel,
+	} {
+		if val == nil {
+			continue
+		}
+		if err := s.m.pg.SetSetting(key, strings.TrimSpace(*val)); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		changed = true
 	}
 	if req.WebSearchEnabled != nil || req.WebSearchBackend != nil || req.BraveKey != nil || req.TavilyKey != nil || req.WebSearchProxy != nil {
 		// Fill unspecified fields from current state so a partial PUT doesn't reset them.

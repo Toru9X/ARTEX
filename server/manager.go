@@ -387,6 +387,11 @@ const (
 	// deepSeekWebSearchBackend borrows the active LLM profile instead of its own
 	// key, so it only works on an anthropic-format profile pointed at DeepSeek.
 	deepSeekWebSearchBackend = "deepseek"
+	// Dedicated credentials for that backend. Any field left empty falls back
+	// to the active LLM profile, so a key alone is enough to stop borrowing it.
+	settingDeepSeekSearchKey     = "deepseek_search_api_key"
+	settingDeepSeekSearchBaseURL = "deepseek_search_base_url"
+	settingDeepSeekSearchModel   = "deepseek_search_model"
 	// defaultWorkers is the concurrent work-agent count when the setting is unset.
 	defaultWorkers = 3
 	// defaultConcurrencyLimit is the simultaneous-running-task cap when the feature
@@ -729,11 +734,42 @@ func (m *Manager) WebSearchOpts() agent.WebSearchOpts {
 // simply fails at search time (or at the settings page's Test button), which is
 // the same feedback every other backend gives for a bad key.
 func (m *Manager) deepSeekSearchCreds() (baseURL, apiKey, model string) {
+	baseURL, apiKey, model = m.deepSeekSearchOverride()
+	if baseURL != "" && apiKey != "" && model != "" {
+		return baseURL, apiKey, model
+	}
 	p, err := m.pg.ActiveProfile()
 	if err != nil || p == nil {
+		return baseURL, apiKey, model
+	}
+	// Per field, not all-or-nothing: a dedicated key with no base URL still
+	// reaches the same endpoint the active profile uses.
+	if baseURL == "" {
+		baseURL = p.BaseURL
+	}
+	if apiKey == "" {
+		apiKey = p.APIKey
+	}
+	if model == "" {
+		model = p.Model
+	}
+	return baseURL, apiKey, model
+}
+
+// deepSeekSearchOverride returns whatever dedicated DeepSeek search settings
+// are configured. Each value is independent; empty means "not set".
+func (m *Manager) deepSeekSearchOverride() (baseURL, apiKey, model string) {
+	if m == nil || m.pg == nil {
 		return "", "", ""
 	}
-	return p.BaseURL, p.APIKey, p.Model
+	read := func(key string) string {
+		v, ok, err := m.pg.GetSetting(key)
+		if err != nil || !ok {
+			return ""
+		}
+		return strings.TrimSpace(v)
+	}
+	return read(settingDeepSeekSearchBaseURL), read(settingDeepSeekSearchKey), read(settingDeepSeekSearchModel)
 }
 
 // SetWebSearch persists and applies the web-search settings. braveKey, tavilyKey, and
