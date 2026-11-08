@@ -105,6 +105,13 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				}
 				_ = pg.UpdateMCPHealth(m.ID, true, "")
 				for _, t := range ts {
+					// Screenshots are an opt-in for the report agent only: hide the
+					// browser MCP's screenshot tools from everyone else, and from the
+					// reporter too while the setting is off.
+					if m.Name == browserMCPName && isBrowserScreenshotTool(t.Name()) &&
+						(agentKey != "reporter" || !pg.GetBool(settingBrowserScreenshot, false)) {
+						continue
+					}
 					// MCP tools return target-influenced content (browser pages, remote
 					// analyses). Flag it in the description (cached prompt + on-demand
 					// schema) so the model treats their output as data, not instructions.
@@ -190,6 +197,13 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 		}
 		return extra, def, cleanup
 	}
+}
+
+// isBrowserScreenshotTool matches the browser MCP's screenshot tools by name,
+// so they can be hidden from every agent that is not allowed to take one.
+func isBrowserScreenshotTool(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return strings.Contains(name, "screenshot")
 }
 
 func idSet(ids []int64) map[int64]bool {

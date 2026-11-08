@@ -453,6 +453,13 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 				if err := s.checkCaseReviewScope(ctx, "update_finding_report", findingCaseRequest{FindingID: json.RawMessage(i64s(fid))}); err != nil {
 					return actool.Errorf(err.Error()), nil
 				}
+				// A report can reference screenshots written under a session directory;
+				// copy them into the task workspace so the links survive the session.
+				if f, err := s.m.pg.GetFinding(fid); err == nil && f != nil && f.TaskID != nil {
+					if err := s.archiveFindingScreenshots(*f.TaskID, a.Report); err != nil {
+						return actool.Errorf("could not archive the report screenshots: " + err.Error()), nil
+					}
+				}
 				if conversationID := intercept.ConvIDFromContext(ctx); conversationID > 0 {
 					if err := s.m.pg.SetFindingReportConversationID(fid, conversationID); err != nil {
 						return actool.Errorf("could not link the report conversation: " + err.Error()), nil
@@ -530,6 +537,13 @@ func (s *Server) seedOrchestrationTools() {
 	s.upgradeReporterTriggerMessage() // backfill migration for old DBs: makes the reporter send evidence_version back (one-time)
 	s.seedFindingTrafficTools()       // adds optional evidence params and read-only evidence tools, preserving user config
 	s.seedFindingWorkflowTools()
+	if s.m.pg.GetBool(settingBrowserScreenshot, false) {
+		// Re-apply the opt-in after startup seeding, so an existing database gets
+		// both the reporter's visibility and the repaired Playwright arguments.
+		if err := s.setReporterBrowserScreenshotVisibility(true); err != nil {
+			log.Printf("[reporter] could not sync the screenshot MCP configuration at startup: %v", err)
+		}
+	}
 	// Note: pentest's default tool bindings need no migration — BuiltinToolSeeds already seeds
 	// list_assets/insert_assets/report_finding/list_findings/list_companies together with
 	// pentest at fresh initialization (no old DBs exist in this project, so no migration).

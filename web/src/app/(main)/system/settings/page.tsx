@@ -55,6 +55,8 @@ export default function SystemSettingsPage() {
   const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
+  const [browserScreenshot, setBrowserScreenshot] = React.useState(false);
+  const [browserScreenshotTimestamp, setBrowserScreenshotTimestamp] = React.useState(false);
   const [intelligenceEnabled, setIntelligenceEnabled] = React.useState(false);
   const [credentialAgent, setCredentialAgent] = React.useState(false);
   const [credentialBinding, setCredentialBinding] = React.useState(false);
@@ -108,6 +110,8 @@ export default function SystemSettingsPage() {
     setNoaCompaction(!!s.noa_compaction);
     setOpsecEnabled(!!s.opsec_enabled);
     setProbeUrlInput(s.egress_probe_url ?? "");
+    setBrowserScreenshot(!!s.browser_screenshot_enabled);
+    setBrowserScreenshotTimestamp(!!s.browser_screenshot_timestamp_enabled);
     setIntelligenceEnabled(!!s.task_intelligence_enabled);
     setCredentialAgent(!!s.credential_agent_enabled);
     setCredentialBinding(!!s.credential_traffic_binding);
@@ -248,6 +252,38 @@ export default function SystemSettingsPage() {
         setNoaCompaction(!v); // revert on failure
         toast.error(`Save failed: ${(e as Error).message}`);
       });
+  };
+
+  const toggleBrowserScreenshot = (v: boolean) => {
+    setBrowserScreenshot(v); // optimistic
+    setSaving(true);
+    api
+      .setSettings({ browser_screenshot_enabled: v })
+      .then((settings) => {
+        apply(settings);
+        toast.success(v ? "Browser screenshots enabled" : "Browser screenshots disabled");
+      })
+      .catch((e) => {
+        setBrowserScreenshot(!v); // revert on failure
+        toast.error(`Save failed: ${(e as Error).message}`);
+      })
+      .finally(() => setSaving(false));
+  };
+
+  const toggleBrowserScreenshotTimestamp = (v: boolean) => {
+    setBrowserScreenshotTimestamp(v); // optimistic
+    setSaving(true);
+    api
+      .setSettings({ browser_screenshot_timestamp_enabled: v })
+      .then((settings) => {
+        apply(settings);
+        toast.success(v ? "Capture-time overlay enabled" : "Capture-time overlay disabled");
+      })
+      .catch((e) => {
+        setBrowserScreenshotTimestamp(!v); // revert on failure
+        toast.error(`Save failed: ${(e as Error).message}`);
+      })
+      .finally(() => setSaving(false));
   };
 
   const toggleAutoTitle = (key: "task_auto_title_enabled" | "chat_auto_title_enabled", value: boolean) => {
@@ -664,6 +700,39 @@ export default function SystemSettingsPage() {
               disabled={!loaded}
               onCheckedChange={toggleNoaCompaction}
             />
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="text-base">Browser screenshots</CardTitle>
+            <CardDescription>
+              Report screenshots and the capture-time overlay. Both switches apply to agent runs started afterwards.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-5">
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="browser-screenshot" className="text-sm font-normal text-muted-foreground">
+                Let the report agent use the browser MCP to save screenshots for the reproduction steps.
+              </Label>
+              <Switch
+                id="browser-screenshot"
+                checked={browserScreenshot}
+                disabled={!loaded || saving}
+                onCheckedChange={toggleBrowserScreenshot}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="browser-screenshot-timestamp" className="text-sm font-normal text-muted-foreground">
+                Overlay the capture time on a screenshot preview. The stored file is never modified.
+              </Label>
+              <Switch
+                id="browser-screenshot-timestamp"
+                checked={browserScreenshotTimestamp}
+                disabled={!loaded || saving}
+                onCheckedChange={toggleBrowserScreenshotTimestamp}
+              />
+            </div>
           </CardContent>
         </Card>
 

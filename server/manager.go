@@ -352,7 +352,11 @@ const (
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
 	// only routes the search backend) and the per-profile LLM proxy.
 	settingGlobalProxy = "global_proxy"
-	settingWorkers     = "workers"
+	// Browser screenshots are opt-in: the reporter may take them only when the
+	// first is on, and the preview overlay shows a capture time only with the second.
+	settingBrowserScreenshot   = "browser_screenshot_enabled"
+	settingScreenshotTimestamp = "browser_screenshot_timestamp_enabled"
+	settingWorkers             = "workers"
 	// worker_pools binds groups of worker slots to specific LLM profiles.
 	// Empty = the flat settingWorkers count with no profile pinning.
 	settingWorkerPools = "worker_pools"
@@ -808,8 +812,13 @@ func (m *Manager) syncBrowserMCPProxy() {
 	proxy := m.ProxyAddr()  // "" when capture off
 	cert := m.ProxyCACert() // "" when capture off
 
-	args := stripProxyArgs(decodeStrSlice(srv.Args))
+	args := ensureBrowserMCPArgs(stripProxyArgs(decodeStrSlice(srv.Args)), m.pg.GetBool(settingBrowserScreenshot, false))
 	env := decodeStrMap(srv.Env)
+	if m.pg.GetBool(settingBrowserScreenshot, false) {
+		// A persisted screenshot opt-in must survive a restart even if an older
+		// database had the seeded MCP disabled.
+		srv.Enabled = true
+	}
 	delete(env, "NODE_EXTRA_CA_CERTS")
 	if proxy != "" {
 		args = append(args, "--proxy-server", proxy)
@@ -828,6 +837,53 @@ func (m *Manager) syncBrowserMCPProxy() {
 	} else {
 		log.Printf("[mcp] browser MCP capture proxy configuration removed")
 	}
+}
+
+// ensureBrowserMCPArgs keeps the browser MCP's own flags in sync with the
+// screenshot opt-in, without touching the proxy flags (strip those first).
+func ensureBrowserMCPArgs(args []string, screenshotEnabled bool) []string {
+	out := append([]string(nil), args...)
+	has := func(want string) bool {
+		for _, arg := range out {
+			if arg == want || strings.HasPrefix(arg, want+"=") {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("--headless") {
+		out = append(out, "--headless")
+	}
+	if !has("--no-sandbox") {
+		out = append(out, "--no-sandbox")
+	}
+	if screenshotEnabled && !has("--ignore-https-errors") {
+		out = append(out, "--ignore-https-errors")
+	}
+	if screenshotEnabled && !has("--isolated") {
+		// Playwright rejects --isolated together with --user-data-dir. The
+		// screenshot opt-in deliberately favours an independent context per run,
+		// so drop a stale or custom persistent-profile flag before enabling the
+		// isolated mode. This also stops an old database row from reintroducing
+		// the shared-profile lock after an upgrade.
+		filtered := make([]string, 0, len(out)+1)
+		for i := 0; i < len(out); i++ {
+			arg := out[i]
+			if arg == "--user-data-dir" {
+				if i+1 < len(out) {
+					i++
+				}
+				continue
+			}
+			if strings.HasPrefix(arg, "--user-data-dir=") {
+				continue
+			}
+			filtered = append(filtered, arg)
+		}
+		out = filtered
+		out = append(out, "--isolated")
+	}
+	return out
 }
 
 // stripProxyArgs removes any --proxy-server/--proxy-bypass flags (both "--flag val"

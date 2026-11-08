@@ -988,6 +988,10 @@ export interface Settings {
   // safety rules is appended to every agent's system prompt; read per render, so a
   // toggle applies from the next agent round.
   opsec_enabled?: boolean;
+  // Browser screenshots (both off by default): whether the report agent may
+  // take one, and whether the preview overlays its capture time.
+  browser_screenshot_enabled?: boolean;
+  browser_screenshot_timestamp_enabled?: boolean;
   // Task intelligence (all off by default). Recording is the master switch: with it
   // off the credential extractor and the traffic binding below are inert.
   task_intelligence_enabled?: boolean;

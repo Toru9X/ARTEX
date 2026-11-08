@@ -789,6 +789,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/workspace/mkdir", s.wsMkdir)
 	mux.HandleFunc("DELETE /api/workspace/delete", s.wsDelete)
 	mux.HandleFunc("GET /api/workspace/download", s.wsDownload)
+	mux.HandleFunc("GET /api/workspace/preview", s.wsPreview)
 	mux.HandleFunc("POST /api/workspace/upload", s.wsUpload)
 	mux.HandleFunc("GET /api/tasks/{id}/scope", s.taskScopeList)
 	mux.HandleFunc("POST /api/tasks/{id}/scope", s.taskScopeAdd)
@@ -2426,7 +2427,7 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(report.FindingsMarkdown(fs, now)))
 	case "md-zip":
 		path := filepath.Join(stage, "findings.zip")
-		if err := buildFindingsEvidenceZip(path, fs, stage, now); err != nil {
+		if err := buildFindingsEvidenceZip(path, fs, stage, now, s.m.dir); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
@@ -3582,6 +3583,10 @@ func (s *Server) settingsPayload() map[string]any {
 		// safety rules is appended to every agent's system prompt; read per render, so
 		// a toggle applies from the next agent round.
 		"opsec_enabled": s.m.OpsecEnabled(),
+		// Browser screenshots (both off by default): whether the reporter may take
+		// one, and whether the preview overlays its capture time.
+		"browser_screenshot_enabled":           s.m.pg.GetBool(settingBrowserScreenshot, false),
+		"browser_screenshot_timestamp_enabled": s.m.pg.GetBool(settingScreenshotTimestamp, false),
 		// Task intelligence: automatic recording, the LLM credential extractor
 		// and whether extracted credentials are matched back to traffic.
 		"task_intelligence_enabled": s.m.pg.GetBool(db.SettingTaskIntelligence, false),
@@ -3689,6 +3694,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		NoaCompaction *bool `json:"noa_compaction"`
 		// OPSEC prompt block switch (default off); read per render, applies from the next agent round, no rebuild needed.
 		OpsecEnabled *bool `json:"opsec_enabled"`
+		// Browser screenshots for the reporter, and the capture-time overlay.
+		BrowserScreenshot   *bool `json:"browser_screenshot_enabled"`
+		ScreenshotTimestamp *bool `json:"browser_screenshot_timestamp_enabled"`
 		// Egress probe settings; read on every probe, so they apply without a restart.
 		EgressProbeURL *string `json:"egress_probe_url"`
 		ShowEgressIP   *bool   `json:"show_egress_ip"`
@@ -3911,6 +3919,26 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	changed := false
+	if req.BrowserScreenshot != nil {
+		if err := s.setReporterBrowserScreenshotVisibility(*req.BrowserScreenshot); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if err := s.m.pg.SetBool(settingBrowserScreenshot, *req.BrowserScreenshot); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		// The reporter's MCP visibility and prompt are assembled when agents are
+		// built, so rebuild now and let the setting apply to the next run instead
+		// of waiting for some later, unrelated change.
+		changed = true
+	}
+	if req.ScreenshotTimestamp != nil {
+		if err := s.m.pg.SetBool(settingScreenshotTimestamp, *req.ScreenshotTimestamp); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	if req.LLMPoolEnabled != nil {
 		if err := s.m.SetLLMPoolEnabled(*req.LLMPoolEnabled); err != nil {
 			writeErr(w, 500, err.Error())
@@ -4331,4 +4359,37 @@ func atoiDefault(s string, d int) int {
 		return n
 	}
 	return d
+}
+
+// setReporterBrowserScreenshotVisibility keeps the report writer's browser MCP
+// permission in sync with the screenshot setting. Other agents keep their own
+// explicit MCP permissions.
+func (s *Server) setReporterBrowserScreenshotVisibility(enabled bool) error {
+	reporter, err := s.m.pg.GetAgentByKey("reporter")
+	if err != nil || reporter == nil {
+		return err
+	}
+	servers, err := s.m.pg.ListMCP()
+	if err != nil {
+		return err
+	}
+	for _, server := range servers {
+		if server.Name == browserMCPName {
+			// Turning screenshots on is an explicit opt-in, so repair the launch
+			// arguments at the same time as the permission: otherwise the next
+			// reporter run meets a deterministic Chromium sandbox error in the
+			// shipped root-based container.
+			if enabled {
+				server.Args = encodeJSON(ensureBrowserMCPArgs(decodeStrSlice(server.Args), true))
+				server.Enabled = true
+				if _, err := s.m.pg.SaveMCP(server); err != nil {
+					return err
+				}
+			}
+			return s.m.pg.ToggleVisibility(reporter.ID, "mcp", server.ID, enabled)
+		}
+	}
+	// An administrator may have deleted the built-in browser MCP. Keep the
+	// setting writable so it applies automatically if the server comes back.
+	return nil
 }
