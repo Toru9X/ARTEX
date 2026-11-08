@@ -189,6 +189,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// Wire DB-stored prompt templates into the agents (new design plan §3.3 / §5a). With no
 	// override row, agents keep their built-in defaults — behavior is unchanged.
 	if m.pg != nil {
+		// Read per render so toggling the switch takes effect on the next agent
+		// round, without rebuilding any agent.
+		agent.OpsecEnabled = m.OpsecEnabled
 		agent.PromptOverride = func(key string) (string, bool) {
 			a, err := m.pg.GetAgentByKey(key)
 			if err != nil || a == nil {
@@ -3459,6 +3462,10 @@ func (s *Server) settingsPayload() map[string]any {
 		// Experimental: noa model-driven context compaction (default off). When on, noa takes over context
 		// compaction for the platform's four agent kinds, replacing built-in compaction; read once per run, applies to runs started afterwards.
 		"noa_compaction": s.m.NoaCompactionEnabled(),
+		// OPSEC prompt block (default off). When on, a code-owned block of operational
+		// safety rules is appended to every agent's system prompt; read per render, so
+		// a toggle applies from the next agent round.
+		"opsec_enabled": s.m.OpsecEnabled(),
 		// Vulnerability IM push global settings. Channels are standalone resources managed via /api/notify/*;
 		// only the three items that "apply to all channels" live here.
 		"notify_enabled":             s.m.pg.GetBool(settingNotifyEnabled, true),
@@ -3531,6 +3538,8 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		ConstraintsInjectWorker  *bool `json:"constraints_inject_worker"`
 		// Experimental: noa context compaction switch (default off); read per run, applies to runs started afterwards, no agent rebuild needed.
 		NoaCompaction *bool `json:"noa_compaction"`
+		// OPSEC prompt block switch (default off); read per render, applies from the next agent round, no rebuild needed.
+		OpsecEnabled *bool `json:"opsec_enabled"`
 		// Vulnerability IM push global settings. The delivery engine re-reads all three every round, so changes
 		// take effect immediately with no agent rebuild or restart.
 		NotifyEnabled    *bool   `json:"notify_enabled"`
@@ -3556,6 +3565,13 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if req.NoaCompaction != nil {
 		// The resolver is read per run; toggling takes effect immediately for runs started afterwards, no applyLLM rebuild needed.
 		if err := s.m.SetNoaCompaction(*req.NoaCompaction); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.OpsecEnabled != nil {
+		// Read per render; the next agent round picks it up, no rebuild needed.
+		if err := s.m.SetOpsec(*req.OpsecEnabled); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}

@@ -297,6 +297,10 @@ const (
 	// when on, the four agent kinds wired into the platform (planner/worker/main
 	// agent/chat) have context compaction taken over by noa, replacing the built-in compaction. Read once per run; toggling affects only runs started afterwards.
 	settingNoaCompaction = "noa_compaction"
+	// OPSEC guidance appended to every agent's system prompt. Off by default. The
+	// block lives in code (agent.opsecPromptBlock), so editing a prompt in the UI
+	// cannot remove it while this is on.
+	settingOpsecEnabled = "opsec_enabled"
 	// defaultWebSearchBackend is used when web search is on but no backend was picked.
 	defaultWebSearchBackend = "ddgs"
 	// deepSeekWebSearchBackend borrows the active LLM profile instead of its own
@@ -525,6 +529,19 @@ func (m *Manager) NoaCompactionEnabled() bool {
 // the resolver reads it per run, so no rebuild is needed.
 func (m *Manager) SetNoaCompaction(on bool) error {
 	return m.pg.SetBool(settingNoaCompaction, on)
+}
+
+// OpsecEnabled reports whether the OPSEC prompt block is appended to every
+// agent's system prompt (off by default; settings.opsec_enabled). Read per
+// render, so a toggle takes effect on the next agent round without a rebuild.
+func (m *Manager) OpsecEnabled() bool {
+	return m.pg.GetBool(settingOpsecEnabled, false)
+}
+
+// SetOpsec persists the OPSEC toggle. Effective on the next agent round — the
+// resolver reads it per render, so no rebuild is needed.
+func (m *Manager) SetOpsec(on bool) error {
+	return m.pg.SetBool(settingOpsecEnabled, on)
 }
 
 // LLMPoolEnabled reports whether LLM failover ("round-robin") is on (off by default;

@@ -945,6 +945,10 @@ export interface Settings {
   // platform's four agent kinds (planner/worker/main agent/chat) have context compression
   // taken over by noa, replacing built-in compaction; read once per run, applying to runs started afterwards.
   noa_compaction?: boolean;
+  // OPSEC prompt block (off by default). When on, a code-owned block of operational
+  // safety rules is appended to every agent's system prompt; read per render, so a
+  // toggle applies from the next agent round.
+  opsec_enabled?: boolean;
   // ---- Vulnerability IM push (channels are a standalone resource, see /api/notify/*; only three global settings live here) ----
   notify_enabled?: boolean; // master push switch, on by default; one-click kill switch for maintenance windows
   notify_public_base_url?: string; // external base URL for vulnerability detail links; empty = messages carry no link

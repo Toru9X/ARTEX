@@ -12,6 +12,31 @@ import (
 // behavior is identical until a user edits a prompt in the UI.
 var PromptOverride func(agentKey string) (string, bool)
 
+// OpsecEnabled is wired by the server to the persisted global setting. Keeping
+// the block here makes it a code-owned runtime tail: database-edited prompts
+// cannot accidentally remove the operational safety guidance. A nil hook means
+// off, so an unconfigured server renders exactly the prompts it did before.
+var OpsecEnabled func() bool
+
+const opsecPromptBlock = `**OPSEC rules (hard constraints, second only to the authorized scope and the task's operation constraints)**
+
+- Reuse existing traffic, browser sessions and already-verified evidence first; when traffic_search/traffic_get or the browser can answer it, do not issue a duplicate direct request.
+- Every interaction with the target must go through the platform's configured recording proxy or the browser tools, so the request stays traceable.
+- Do not reach the target directly with the default headers of bare curl, urllib, requests and the like. A command-line request must reuse the User-Agent, Accept, Referer and Cookie characteristics found in the target's existing traffic as far as possible; never fabricate an identity, device or browser fingerprint without a real basis.
+- Do not bypass certificate validation with -k, --ignore-https-errors, verify=False or similar; when the platform proxy CA is configured, validation must pass normally.
+- Do not randomly rotate User-Agents, run bulk concurrency, tight loops, unbounded retries, port sweeps, directory brute force or large-scale scanning; stop the current direction immediately on a rate limit, CAPTCHA, WAF or anomalous response.
+- OPSEC does not widen the authorized scope; do not touch a target, host, port, path or account outside it.
+- Leaving a trail of requests and responses is the platform proxy's and the browser's job; do not additionally copy full request headers, cookies or response bodies.`
+
+// withOpsecTail appends the code-owned OPSEC tail when the toggle is on. Every
+// renderSystem exit goes through it so no render path can skip the block.
+func withOpsecTail(body string) string {
+	if OpsecEnabled != nil && OpsecEnabled() {
+		return body + "\n\n" + opsecPromptBlock
+	}
+	return body
+}
+
 // Prompt-variable structs — fields mirror each agent's catalog (docs §5a) so a
 // user template referencing a catalog variable renders; referencing anything else
 // fails template execution and falls back to the built-in default.
@@ -44,13 +69,13 @@ func renderSystem(agentKey, def string, vars any) string {
 		}
 	}
 	if out, err := renderTmpl(tmpl, vars); err == nil {
-		return out
+		return withOpsecTail(out)
 	}
 	// DB template broke (e.g. references an out-of-catalog var) → code default.
 	if out, err := renderTmpl(def, vars); err == nil {
-		return out
+		return withOpsecTail(out)
 	}
-	return def
+	return withOpsecTail(def)
 }
 
 func renderTmpl(tmpl string, vars any) (string, error) {

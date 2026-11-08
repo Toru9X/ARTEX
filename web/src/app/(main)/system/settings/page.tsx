@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { CpuIcon, FlaskConicalIcon, KeyboardIcon, RadioTowerIcon, SearchIcon, ShieldAlertIcon } from "lucide-react";
+import { CpuIcon, EyeOffIcon, FlaskConicalIcon, KeyboardIcon, RadioTowerIcon, SearchIcon, ShieldAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,8 @@ export default function SystemSettingsPage() {
   const [injectWorker, setInjectWorker] = React.useState(true);
   // Experimental: noa context compaction (off by default).
   const [noaCompaction, setNoaCompaction] = React.useState(false);
+  // OPSEC prompt block appended to every agent's system prompt (off by default).
+  const [opsecEnabled, setOpsecEnabled] = React.useState(false);
   // Pure frontend preference: bypasses /api/settings, reads and writes localStorage directly.
   const sendMode = useChatSendMode();
 
@@ -58,6 +60,7 @@ export default function SystemSettingsPage() {
     setInjectPlanner(s.constraints_inject_planner !== false);
     setInjectWorker(s.constraints_inject_worker !== false);
     setNoaCompaction(!!s.noa_compaction);
+    setOpsecEnabled(!!s.opsec_enabled);
   }, []);
 
   const saveWorkers = () => {
@@ -145,6 +148,20 @@ export default function SystemSettingsPage() {
       .setSettings({ constraints_inject_worker: v })
       .then(apply)
       .catch(() => setInjectWorker(!v)); // revert on failure
+  };
+
+  const toggleOpsec = (v: boolean) => {
+    setOpsecEnabled(v); // optimistic
+    api
+      .setSettings({ opsec_enabled: v })
+      .then((s) => {
+        apply(s);
+        toast.success(v ? "Enabled OPSEC rules (applies from the next agent round)" : "Disabled OPSEC rules");
+      })
+      .catch((e) => {
+        setOpsecEnabled(!v); // revert on failure
+        toast.error(`Save failed: ${(e as Error).message}`);
+      });
   };
 
   const toggleNoaCompaction = (v: boolean) => {
@@ -398,6 +415,29 @@ export default function SystemSettingsPage() {
                 onCheckedChange={toggleInjectWorker}
               />
             </div>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <EyeOffIcon className="size-4" />
+              OPSEC rules
+            </CardTitle>
+            <CardDescription>
+              When enabled, a fixed block of <b>operational safety rules</b> is appended to every agent's system prompt: reuse recorded traffic
+              before issuing a fresh request, reach the target only through the recording proxy or the browser tools, never bypass certificate
+              validation, and stop on a rate limit, CAPTCHA or WAF instead of hammering through.
+              <br />
+              The block lives <b>in code</b>, not in the editable prompt body, so editing a prompt under "Agents" cannot remove it. It does{" "}
+              <b>not</b> widen the authorized scope. Switching takes effect from the next agent round without rebuilding agents.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex items-center justify-between gap-4">
+            <Label htmlFor="opsec-enabled" className="text-sm font-normal text-muted-foreground">
+              Append OPSEC rules{opsecEnabled ? " · On" : " · Off"}
+            </Label>
+            <Switch id="opsec-enabled" checked={opsecEnabled} disabled={!loaded} onCheckedChange={toggleOpsec} />
           </CardContent>
         </Card>
 
