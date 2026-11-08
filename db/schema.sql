@@ -1489,3 +1489,9 @@ CREATE TABLE IF NOT EXISTS rsi_lesson_usage (
 -- supervisor resumes only the tasks it paused itself, so a user pause that
 -- lands during an outage is never revived by a recovering proxy.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pause_reason TEXT NOT NULL DEFAULT '';
+
+-- Free-form operator note on a task and on a task template. Kept out of the
+-- name so the list stays scannable while the note can hold scope details,
+-- credentials-handling reminders or handover context.
+ALTER TABLE tasks           ADD COLUMN IF NOT EXISTS remark TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_templates  ADD COLUMN IF NOT EXISTS remark TEXT NOT NULL DEFAULT '';

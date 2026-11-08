@@ -43,6 +43,8 @@ type Task struct {
 	// PauseReason names who paused the task (paused_by_user /
 	// paused_by_orchestrator / paused_by_proxy); empty while running.
 	PauseReason string `json:"pause_reason,omitempty"`
+	// Remark is a free-form operator note; see db.MaxTaskRemarkRunes.
+	Remark string `json:"remark,omitempty"`
 	// Reconnect* is the in-memory auto-resume state for a paused_by_proxy task.
 	// Not persisted: an outage does not survive a restart, and on reload the
 	// task simply stays paused until the supervisor adopts it again.
@@ -103,6 +105,8 @@ type taskLifecycleState struct {
 	// paused_by_user / paused_by_orchestrator / paused_by_proxy. The proxy
 	// supervisor resumes only the tasks it paused itself.
 	PauseReason string
+	// Remark is a free-form operator note; see db.MaxTaskRemarkRunes.
+	Remark string
 	// Reconnect* track the auto-resume attempt for a paused_by_proxy task.
 	// Generation is bumped on every new pause so a late success from a previous
 	// outage cannot resume a task that has since been paused again.
@@ -144,6 +148,7 @@ func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 		Status:              t.Status,
 		Paused:              t.Paused,
 		PauseReason:         t.PauseReason,
+		Remark:              t.Remark,
 		ReconnectAttempt:    t.ReconnectAttempt,
 		ReconnectMax:        t.ReconnectMax,
 		ReconnectNextAt:     t.ReconnectNextAt,
@@ -175,6 +180,7 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.Status = state.Status
 	t.Paused = state.Paused
 	t.PauseReason = state.PauseReason
+	t.Remark = state.Remark
 	t.ReconnectAttempt = state.ReconnectAttempt
 	t.ReconnectMax = state.ReconnectMax
 	t.ReconnectNextAt = state.ReconnectNextAt
@@ -996,7 +1002,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		Name:       pt.Name,
 		CategoryID: cloneInt64Ptr(pt.CategoryID), CategoryName: pt.CategoryName,
 		PinnedAt:    unixOrZero(pt.PinnedAt),
-		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, PauseReason: pt.PauseReason, Queued: pt.Queued,
+		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, PauseReason: pt.PauseReason, Remark: pt.Remark, Queued: pt.Queued,
 		QueuedAt: unixNanoOrZero(pt.QueuedAt), QueueMode: pt.QueueMode,
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,
 		LLMProfileID:  pt.LLMProfileID,
@@ -1034,6 +1040,7 @@ func (m *Manager) UpdateTaskMetadata(taskID string, patch pgdb.TaskPatch) (*Task
 	}
 	task.updateLifecycle(func(state *taskLifecycleState) {
 		state.Name = updated.Name
+		state.Remark = updated.Remark
 		state.PinnedAt = unixOrZero(updated.PinnedAt)
 	})
 	// Live switch (#86): runRound reads the flag per round, so the next

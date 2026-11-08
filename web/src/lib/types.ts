@@ -4,9 +4,14 @@
 export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | "failed" | "timeout";
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
+// MAX_TASK_REMARK_RUNES mirrors db.MaxTaskRemarkRunes. Counted in runes so the
+// client-side check matches the server's and a CJK note is not rejected early.
+export const MAX_TASK_REMARK_RUNES = 2000;
+
 export interface Task {
   id: string;
   name?: string; // optional task name; empty/absent = untitled, display falls back to the description
+  remark?: string; // free-form operator note; empty/absent = none
   category_id?: number;
   category_name?: string;
   pinned?: boolean;

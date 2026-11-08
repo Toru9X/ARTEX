@@ -26,6 +26,7 @@ func (s *Server) updateTaskMetadata(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxTaskMetadataRequestSize)
 	var request struct {
 		Name          *string `json:"name"`
+		Remark        *string `json:"remark"`
 		Pinned        *bool   `json:"pinned"`
 		PlanQuietMode *bool   `json:"plan_quiet_mode"`
 	}
@@ -38,8 +39,8 @@ func (s *Server) updateTaskMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if request.Name == nil && request.Pinned == nil && request.PlanQuietMode == nil {
-		writeErr(w, http.StatusBadRequest, "at least one of name, pinned or plan_quiet_mode must be provided")
+	if request.Name == nil && request.Remark == nil && request.Pinned == nil && request.PlanQuietMode == nil {
+		writeErr(w, http.StatusBadRequest, "at least one of name, remark, pinned or plan_quiet_mode must be provided")
 		return
 	}
 	if request.Name != nil {
@@ -54,7 +55,17 @@ func (s *Server) updateTaskMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 		request.Name = &name
 	}
-	task, err := s.m.UpdateTaskMetadata(taskID, db.TaskPatch{Name: request.Name, Pinned: request.Pinned, PlanQuietMode: request.PlanQuietMode})
+	if request.Remark != nil {
+		// An empty remark is valid and clears the note, so it is not rejected
+		// the way an empty name is.
+		remark, err := normalizeRemark(*request.Remark)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		request.Remark = &remark
+	}
+	task, err := s.m.UpdateTaskMetadata(taskID, db.TaskPatch{Name: request.Name, Remark: request.Remark, Pinned: request.Pinned, PlanQuietMode: request.PlanQuietMode})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
