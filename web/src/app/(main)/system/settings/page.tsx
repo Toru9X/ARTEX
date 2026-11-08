@@ -2,7 +2,16 @@
 
 import * as React from "react";
 
-import { CpuIcon, EyeOffIcon, FlaskConicalIcon, KeyboardIcon, RadioTowerIcon, SearchIcon, ShieldAlertIcon } from "lucide-react";
+import {
+  CpuIcon,
+  EyeOffIcon,
+  FlaskConicalIcon,
+  Globe2Icon,
+  KeyboardIcon,
+  RadioTowerIcon,
+  SearchIcon,
+  ShieldAlertIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -13,7 +22,21 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSendMode } from "@/lib/chat-send-mode";
-import type { Settings } from "@/lib/types";
+import type { EgressCheck, Settings } from "@/lib/types";
+import { cn } from "@/lib/utils";
+
+import { useEgressIp } from "../../_components/egress-ip-banner";
+
+// egressCheckText renders one probe row: the skip reason, the exit IP, or the
+// most specific failure available. probes[] carries the per-address error,
+// which says far more than the summary ("every probe address failed").
+function egressCheckText(check: EgressCheck): string {
+  if (check.skipped) return check.skip_reason ?? "skipped";
+  if (check.result.ok) {
+    return `${check.result.exit_ip} · ${check.result.via_label} · ${check.result.latency_ms}ms`;
+  }
+  return check.result.probes.at(-1)?.error || check.result.error || "failed";
+}
 
 export default function SystemSettingsPage() {
   const [trafficCapture, setTrafficCapture] = React.useState(false);
@@ -43,6 +66,17 @@ export default function SystemSettingsPage() {
   const [noaCompaction, setNoaCompaction] = React.useState(false);
   // OPSEC prompt block appended to every agent's system prompt (off by default).
   const [opsecEnabled, setOpsecEnabled] = React.useState(false);
+  // Custom IP-echo endpoint for the egress probe (empty = built-in public ones).
+  const [probeUrlInput, setProbeUrlInput] = React.useState("");
+  const [savingProbeUrl, setSavingProbeUrl] = React.useState(false);
+  const {
+    enabled: showEgressIp,
+    report: egressReport,
+    isLoading: egressLoading,
+    error: egressError,
+    setEnabled: setShowEgressIp,
+    probeEgress,
+  } = useEgressIp();
   // Pure frontend preference: bypasses /api/settings, reads and writes localStorage directly.
   const sendMode = useChatSendMode();
 
@@ -61,6 +95,7 @@ export default function SystemSettingsPage() {
     setInjectWorker(s.constraints_inject_worker !== false);
     setNoaCompaction(!!s.noa_compaction);
     setOpsecEnabled(!!s.opsec_enabled);
+    setProbeUrlInput(s.egress_probe_url ?? "");
   }, []);
 
   const saveWorkers = () => {
@@ -148,6 +183,22 @@ export default function SystemSettingsPage() {
       .setSettings({ constraints_inject_worker: v })
       .then(apply)
       .catch(() => setInjectWorker(!v)); // revert on failure
+  };
+
+  const saveProbeUrl = () => {
+    setSavingProbeUrl(true);
+    api
+      .setSettings({ egress_probe_url: probeUrlInput.trim() })
+      .then((s) => {
+        apply(s);
+        toast.success(probeUrlInput.trim() ? "Saved custom probe endpoint" : "Cleared it; using the built-in probes");
+      })
+      .catch((e) => toast.error(`Save failed: ${(e as Error).message}`))
+      .finally(() => setSavingProbeUrl(false));
+  };
+
+  const toggleShowEgressIp = (v: boolean) => {
+    void setShowEgressIp(v).catch((e) => toast.error(`Save failed: ${(e as Error).message}`));
   };
 
   const toggleOpsec = (v: boolean) => {
@@ -375,6 +426,87 @@ export default function SystemSettingsPage() {
             <p className="text-muted-foreground text-xs">
               {globalProxyInput.trim() ? "Configured · all target traffic egresses through this proxy" : "Not configured · target traffic egresses directly"}
             </p>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Globe2Icon className="size-4" />
+              Egress check
+            </CardTitle>
+            <CardDescription>
+              Saving a global proxy only validates its shape — a dead proxy saves fine. This sends a real request and
+              reports two exit IPs: <b>(1)</b> going direct and <b>(2)</b> through the proxy. The address in the field
+              above is tested even before you save it, so the result may differ from what the agent currently uses; the
+              warnings say when that is the case.
+              <br />
+              A <b>custom endpoint</b> is usually an intranet echo service, so private ranges are allowed. Loopback and
+              link-local are refused: inside a container those reach ARTEX itself and the cloud metadata service.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <Label htmlFor="egress-probe-url" className="text-sm font-normal text-muted-foreground">
+              Custom IP probe service
+            </Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="egress-probe-url"
+                autoComplete="off"
+                placeholder="http://10.0.0.5:19000/ip (empty = built-in public probes)"
+                value={probeUrlInput}
+                disabled={!loaded || savingProbeUrl}
+                onChange={(e) => setProbeUrlInput(e.target.value)}
+              />
+              <Button type="button" onClick={saveProbeUrl} disabled={!loaded || savingProbeUrl}>
+                Save
+              </Button>
+            </div>
+
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="show-egress-ip" className="text-sm font-normal text-muted-foreground">
+                Show the exit IP in the navbar{showEgressIp ? " · On" : " · Off"}
+              </Label>
+              <Switch
+                id="show-egress-ip"
+                checked={showEgressIp}
+                disabled={!loaded}
+                onCheckedChange={toggleShowEgressIp}
+              />
+            </div>
+            <p className="text-muted-foreground text-xs">
+              Off by default: while on, the navbar re-probes every 10 seconds and each poll is a real outbound request.
+            </p>
+
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void probeEgress().catch(() => undefined)}
+                disabled={!loaded || egressLoading}
+              >
+                {egressLoading ? "Probing…" : "Run egress check"}
+              </Button>
+              {egressError && <span className="text-destructive text-xs">{egressError}</span>}
+            </div>
+
+            {egressReport && (
+              <div className="flex flex-col gap-1 text-xs">
+                {egressReport.checks.map((check) => (
+                  <div key={check.key} className="flex items-baseline justify-between gap-2">
+                    <span className="text-muted-foreground">{check.label}</span>
+                    <span className={cn("font-mono", !check.skipped && !check.result.ok && "text-destructive")}>
+                      {egressCheckText(check)}
+                    </span>
+                  </div>
+                ))}
+                {egressReport.warnings?.map((warning) => (
+                  <p key={warning} className="text-amber-600 dark:text-amber-500">
+                    {warning}
+                  </p>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
 

@@ -10,6 +10,7 @@ import { useCurrentUser } from "@/hooks/use-current-user";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+import { EgressIpNavbar, EgressIpProvider } from "./egress-ip-banner";
 import { LiveClock } from "./live-clock";
 import { AccountSwitcher } from "./sidebar/account-switcher";
 import { LayoutControls } from "./sidebar/layout-controls";
@@ -32,6 +33,16 @@ function isFullBleed(pathname: string) {
 }
 
 export function MainContent({ children }: { children: ReactNode }) {
+  // The provider wraps the inner content so the settings page can share the
+  // same probe state as the navbar indicator.
+  return (
+    <EgressIpProvider>
+      <MainContentInner>{children}</MainContentInner>
+    </EgressIpProvider>
+  );
+}
+
+function MainContentInner({ children }: { children: ReactNode }) {
   const currentUser = useCurrentUser();
   const pathname = usePathname();
   const [version, setVersion] = useState("");
@@ -64,7 +75,10 @@ export function MainContent({ children }: { children: ReactNode }) {
             />
             <SearchDialog />
           </div>
-          <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <EgressIpNavbar />
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
             <LiveClock />
             {version && (
               <span className="font-medium text-muted-foreground text-xs tabular-nums">Version · {version}</span>

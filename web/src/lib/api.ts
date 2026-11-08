@@ -35,6 +35,7 @@ import type {
   DeleteTaskResult,
   Edge,
   EvidenceBodyPreview,
+  EgressReport,
   ExplorationNodePage,
   ExplorationNodeQuery,
   Finding,
@@ -832,6 +833,10 @@ export const api = {
     brave_search_api_key?: string;
     tavily_search_api_key?: string;
   }) => post<{ ok: boolean; error?: string; count?: number; backend?: string }>(`/settings/web-search/test`, patch),
+  // Probe the egress path. An empty global_proxy tests the direct path; probe_url
+  // omitted = the saved address, "" = the built-in defaults, set = a temporary override.
+  testEgressProxy: (patch: { global_proxy?: string; probe_url?: string }) =>
+    post<EgressReport>(`/settings/proxy/test`, patch),
 
   // ---- Vulnerability IM push ----
   // Channels are multi-instance resources (several bots of the same kind, each with its own

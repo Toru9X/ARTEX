@@ -62,6 +62,10 @@ type Server struct {
 	lastCPUUse uint64
 	lastCPUAt  time.Time
 
+	// proxyProbe is injectable for deterministic probe tests. Production
+	// servers leave it nil and use probeEgress directly.
+	proxyProbe func(context.Context, string, string, []string, time.Duration) egressProbeResult
+
 	// concMu serializes concurrency-cap decisions (admission + reconcile) so a
 	// scheduler tick and an HTTP settings change / task creation can't both count
 	// free slots off the same snapshot and over-promote past the limit.
@@ -846,6 +850,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/notify/deliveries", s.notifyListDeliveries)
 	mux.HandleFunc("POST /api/notify/deliveries/{id}/retry", s.notifyRetryDelivery)
 	mux.HandleFunc("POST /api/settings/web-search/test", s.testWebSearch)
+	mux.HandleFunc("POST /api/settings/proxy/test", s.testEgressProxy)
 	mux.HandleFunc("GET /api/report", s.getReport)
 	mux.HandleFunc("GET /api/chat/mentions", s.searchChatMentions)
 	mux.HandleFunc("POST /api/chat", s.chat)
@@ -3474,6 +3479,10 @@ func (s *Server) settingsPayload() map[string]any {
 		// safety rules is appended to every agent's system prompt; read per render, so
 		// a toggle applies from the next agent round.
 		"opsec_enabled": s.m.OpsecEnabled(),
+		// Egress probe: custom IP-echo endpoint (empty = built-in public ones)
+		// and whether the navbar displays the current exit IP.
+		"egress_probe_url": s.m.EgressProbeURL(),
+		"show_egress_ip":   s.m.ShowEgressIP(),
 		// Vulnerability IM push global settings. Channels are standalone resources managed via /api/notify/*;
 		// only the three items that "apply to all channels" live here.
 		"notify_enabled":             s.m.pg.GetBool(settingNotifyEnabled, true),
@@ -3548,6 +3557,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		NoaCompaction *bool `json:"noa_compaction"`
 		// OPSEC prompt block switch (default off); read per render, applies from the next agent round, no rebuild needed.
 		OpsecEnabled *bool `json:"opsec_enabled"`
+		// Egress probe settings; read on every probe, so they apply without a restart.
+		EgressProbeURL *string `json:"egress_probe_url"`
+		ShowEgressIP   *bool   `json:"show_egress_ip"`
 		// Vulnerability IM push global settings. The delivery engine re-reads all three every round, so changes
 		// take effect immediately with no agent rebuild or restart.
 		NotifyEnabled    *bool   `json:"notify_enabled"`
@@ -3580,6 +3592,30 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if req.OpsecEnabled != nil {
 		// Read per render; the next agent round picks it up, no rebuild needed.
 		if err := s.m.SetOpsec(*req.OpsecEnabled); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.EgressProbeURL != nil {
+		// Validate before storing: a probe URL pointing at loopback or
+		// link-local would turn this endpoint into an SSRF primitive. Empty
+		// clears the override and restores the built-in public probes.
+		value := strings.TrimSpace(*req.EgressProbeURL)
+		if value != "" {
+			checked, err := validateProbeURL(value)
+			if err != nil {
+				writeErr(w, 400, err.Error())
+				return
+			}
+			value = checked
+		}
+		if err := s.m.SetEgressProbeURL(value); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.ShowEgressIP != nil {
+		if err := s.m.SetShowEgressIP(*req.ShowEgressIP); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}

@@ -301,6 +301,10 @@ const (
 	// block lives in code (agent.opsecPromptBlock), so editing a prompt in the UI
 	// cannot remove it while this is on.
 	settingOpsecEnabled = "opsec_enabled"
+	// Egress probe: a custom IP-echo endpoint (empty = the built-in public
+	// ones), and whether the navbar shows the current exit IP.
+	settingEgressProbeURL = "egress_probe_url"
+	settingShowEgressIP   = "show_egress_ip"
 	// defaultWebSearchBackend is used when web search is on but no backend was picked.
 	defaultWebSearchBackend = "ddgs"
 	// deepSeekWebSearchBackend borrows the active LLM profile instead of its own
@@ -542,6 +546,24 @@ func (m *Manager) OpsecEnabled() bool {
 // resolver reads it per render, so no rebuild is needed.
 func (m *Manager) SetOpsec(on bool) error {
 	return m.pg.SetBool(settingOpsecEnabled, on)
+}
+
+// ShowEgressIP reports whether the navbar polls and displays the current exit
+// IP (off by default; settings.show_egress_ip). It costs one outbound request
+// per poll, so it stays opt-in.
+func (m *Manager) ShowEgressIP() bool {
+	return m.pg.GetBool(settingShowEgressIP, false)
+}
+
+// SetShowEgressIP persists the navbar exit-IP toggle.
+func (m *Manager) SetShowEgressIP(on bool) error {
+	return m.pg.SetBool(settingShowEgressIP, on)
+}
+
+// SetEgressProbeURL persists the custom IP-echo endpoint; empty restores the
+// built-in public probes.
+func (m *Manager) SetEgressProbeURL(raw string) error {
+	return m.pg.SetSetting(settingEgressProbeURL, strings.TrimSpace(raw))
 }
 
 // LLMPoolEnabled reports whether LLM failover ("round-robin") is on (off by default;

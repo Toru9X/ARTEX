@@ -928,6 +928,11 @@ export interface Settings {
   // Global egress proxy (http/https/socks5, may carry user:pass) that all target traffic goes
   // through. Acts as the MITM upstream when traffic capture is on; injected directly into the agent's bash/WebFetch when capture is off. Empty = direct.
   global_proxy?: string;
+  // Custom IP-echo endpoint for the egress probe; empty = the built-in public ones.
+  egress_probe_url?: string;
+  // Whether the navbar polls and shows the current exit IP. Off by default: each
+  // poll is a real outbound request.
+  show_egress_ip?: boolean;
   python_interpreter?: string; // python interpreter path for custom script tools (empty = detect at runtime)
   workers?: number; // concurrent worker agent count (default 3); applies to tasks started afterwards
   // Task concurrency cap: max simultaneously "running" tasks. Off = unlimited; on, new tasks beyond the limit queue and start automatically when a slot frees up.
@@ -1282,6 +1287,46 @@ export interface SystemMetrics {
   memory: SystemMetricValue;
   disk: SystemMetricValue;
   data_disk: SystemMetricValue;
+}
+
+// ---- Egress proxy connectivity test (POST /api/settings/proxy/test) ----
+export interface EgressProbeResult {
+  ok: boolean;
+  exit_ip?: string;
+  via?: "direct" | "http" | "https" | "socks5";
+  via_label?: string;
+  latency_ms: number;
+  error?: string;
+  // Per-address detail: separates "cannot reach the proxy" from "proxy is up
+  // but has no route out".
+  probes: {
+    url: string;
+    ok: boolean;
+    ip?: string;
+    latency_ms: number;
+    error?: string;
+  }[];
+}
+
+// One row of the report: (1) direct / (2) through the global proxy.
+export interface EgressCheck {
+  key: "direct" | "global";
+  label: string;
+  path?: string;
+  skipped?: boolean;
+  skip_reason?: string;
+  result: EgressProbeResult;
+}
+
+export interface EgressReport {
+  ok: boolean;
+  capture: boolean;
+  configured: string;
+  // agent_proxy is the address the agent really uses: with capture on it is
+  // the traffic-capture address, not the value in the form field.
+  agent_proxy: string;
+  checks: EgressCheck[];
+  warnings?: string[];
 }
 
 // ---- Intercept Rules ----
