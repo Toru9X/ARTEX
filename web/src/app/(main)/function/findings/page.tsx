@@ -17,11 +17,14 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { FindingCaseList } from "@/components/finding-case-list";
+import { FindingDateFilter, type FindingDateRange } from "@/components/finding-date-filter";
 import { FindingRetestDialog } from "@/components/finding-retest-dialog";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -40,11 +43,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
-import { statusMeta } from "@/lib/status";
+import { SEVERITY_FILTER_OPTIONS, statusMeta } from "@/lib/status";
 import type {
   ActiveFindingRetest,
   Finding,
   FindingAssetNode,
+  FindingCaseListRow,
   FindingGroup,
   FindingStats,
   FindingStatus,
@@ -67,14 +71,14 @@ import {
 
 const FINDING_LIST_PREFERENCE_KEY = "artex_finding_list_preferences";
 
-// List views: flat = one big cross-task table (default); grouped = collapsible groups by task;
-// asset = left asset tree + the findings under that subtree on the right.
-type FindingView = "flat" | "grouped" | "asset";
+// List views: flat = one cross-task table (default); grouped = collapsed by task;
+// asset = an asset tree on the left and the findings under that subtree on the right.
+type FindingView = "cases" | "flat" | "grouped" | "asset";
 
-const FINDING_VIEWS: FindingView[] = ["flat", "grouped", "asset"];
+const FINDING_VIEWS: FindingView[] = ["cases", "flat", "grouped", "asset"];
 
-// One-shot snapshot of the asset tree. Unlike the other two views, the asset view doesn't poll:
-// it re-queries on view entry, filter changes, or finding mutations made on this page.
+// A one-shot snapshot of the asset tree. Unlike the other two views the asset view does not poll:
+// it re-queries on entering the view, on a filter change, or after this page changed a finding.
 interface AssetTreeState {
   nodes: FindingAssetNode[];
   findingTotal: number;
@@ -93,8 +97,9 @@ const EMPTY_ASSET_TREE: AssetTreeState = {
   loading: false,
 };
 
-// In the grouped view, every expanded task group carries its own pagination state, independent of the others.
+// In the grouped view each expanded task group carries its own, independent pagination state.
 interface GroupFindingsState {
+  caseRows: FindingCaseListRow[];
   items: Finding[];
   total: number;
   page: number;
@@ -103,15 +108,16 @@ interface GroupFindingsState {
   loading: boolean;
 }
 
-// The flat view's page number lives in its own state (not inside the snapshot), so a filter change resets it and triggers a reload.
+// The flat view's page number lives in its own state (not in the snapshot) so a filter change can reset it and trigger a reload.
 interface FlatFindingsState {
+  caseRows: FindingCaseListRow[];
   items: Finding[];
   total: number;
   loaded: boolean;
   loading: boolean;
 }
 
-const EMPTY_FLAT_STATE: FlatFindingsState = { items: [], total: 0, loaded: false, loading: false };
+const EMPTY_FLAT_STATE: FlatFindingsState = { caseRows: [], items: [], total: 0, loaded: false, loading: false };
 
 function findingGroupKey(group: FindingGroup) {
   return group.task_id === null ? UNASSIGNED_TASK : String(group.task_id);
@@ -129,7 +135,7 @@ const EMPTY_STATS: FindingStats = {
 };
 
 export default function FindingsPage() {
-  const [view, setView] = React.useState<FindingView>("flat");
+  const [view, setView] = React.useState<FindingView>("cases");
   const [severity, setSeverity] = React.useState<"all" | Severity>("all");
   const [status, setStatus] = React.useState<"all" | FindingStatus>("all");
   const [vulnclass, setVulnclass] = React.useState<string>("all");
@@ -137,6 +143,7 @@ export default function FindingsPage() {
   const [sort, setSort] = React.useState<"severity" | "time">("severity");
   const [search, setSearch] = React.useState("");
   const [query, setQuery] = React.useState("");
+  const [dateRange, setDateRange] = React.useState<FindingDateRange>({});
   const [expanded, setExpanded] = React.useState<string | null>(null);
   const [flat, setFlat] = React.useState<FlatFindingsState>(EMPTY_FLAT_STATE);
   const [flatPage, setFlatPage] = React.useState(1);
@@ -162,11 +169,20 @@ export default function FindingsPage() {
   const retestRefreshVersion = React.useRef(0);
   const [deepenDescription, setDeepenDescription] = React.useState("");
   const [deepening, setDeepening] = React.useState(false);
-  const filterFingerprint = JSON.stringify([severity, status, vulnclass, task, sort, query]);
+  const filterFingerprint = JSON.stringify([
+    severity,
+    status,
+    vulnclass,
+    task,
+    sort,
+    query,
+    dateRange.from,
+    dateRange.to,
+  ]);
   const activeFilterFingerprint = React.useRef(filterFingerprint);
   activeFilterFingerprint.current = filterFingerprint;
 
-  // One lightweight request covers all rows/views, avoiding per-row fetches of full retest history; wait for the previous round to finish before polling again.
+  // One light request covers every row and view, instead of fetching full retest history per row; the next poll waits for the previous one.
   React.useEffect(() => {
     let disposed = false;
     let failed = false;
@@ -179,7 +195,7 @@ export default function FindingsPage() {
         setActiveRetests(Object.fromEntries(rows.map((item) => [item.finding_id, item])));
         failed = false;
       } catch (error) {
-        if (!disposed && !failed) toast.error(`Failed to load retest status: ${(error as Error).message}`);
+        if (!disposed && !failed) toast.error(`Could not load the retest state: ${(error as Error).message}`);
         failed = true;
       } finally {
         if (!disposed) timer = setTimeout(() => void refreshRetests(), 3000);
@@ -234,24 +250,36 @@ export default function FindingsPage() {
     return () => window.clearTimeout(timer);
   }, [search]);
 
-  // setFindings rewrites the same finding in both view caches at once, so switching views never shows stale state.
+  // setFindings rewrites the same finding in both view caches, so switching views never shows a stale status.
   const setFindings = React.useCallback((update: (current: Finding[]) => Finding[]) => {
-    setFlat((current) => ({ ...current, items: update(current.items) }));
+    function applyUpdate<T extends { items: Finding[]; caseRows: FindingCaseListRow[] }>(current: T): T {
+      const items = update(current.items);
+      const byId = new Map(items.map((f) => [findingRowKey(f), f]));
+      const caseRows = current.caseRows.flatMap((row) => {
+        if (row.case) return [row];
+        const finding = row.finding ? byId.get(findingRowKey(row.finding)) : undefined;
+        return finding ? [{ ...row, finding }] : [];
+      });
+      return { ...current, items, caseRows };
+    }
+    setFlat(applyUpdate);
     setGroupFindings((current) => {
       const next: Record<string, GroupFindingsState> = {};
       for (const [key, state] of Object.entries(current)) {
-        next[key] = { ...state, items: update(state.items) };
+        next[key] = applyUpdate(state);
       }
       return next;
     });
   }, []);
 
-  // Export selection: tracked by finding_id (the standalone table's id), preserved across pages.
+  // Export selection: selected rows are keyed by finding_id (the standalone table id) and survive paging.
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(() => new Set());
-  // Export dialog state: scope (current filter / all / selected) × format (single md / per-finding md zip / csv / json).
+  // Export dialog state: scope (current filter / all / selected) x format (one md / md per file zip / csv / json).
   const [exportOpen, setExportOpen] = React.useState(false);
   const [exportScope, setExportScope] = React.useState<"filtered" | "all" | "selected">("filtered");
   const [exportFormat, setExportFormat] = React.useState<"md-single" | "md-zip" | "csv" | "json">("md-single");
+  const [includeOriginals, setIncludeOriginals] = React.useState(false);
+  const [reviewing, setReviewing] = React.useState(false);
   const [exporting, setExporting] = React.useState(false);
 
   const toggleSelected = React.useCallback((id: string, checked: boolean) => {
@@ -274,7 +302,7 @@ export default function FindingsPage() {
     });
   }, []);
 
-  // When opening the export dialog, default the scope to "Selected" if any rows are checked, else "Current filter".
+  // Opening the export dialog defaults the scope to "selected" when something is ticked, otherwise to the current filter.
   function openExport() {
     setExportScope(selectedIds.size > 0 ? "selected" : "filtered");
     setExportOpen(true);
@@ -286,11 +314,21 @@ export default function FindingsPage() {
       await api.exportFindings({
         format: exportFormat,
         scope: exportScope,
-        filters: { severity, status, vulnclass, task, query, sort },
+        filters: {
+          severity,
+          status,
+          vulnclass,
+          task,
+          query,
+          sort,
+          ...dateRange,
+          assetScope: view === "asset" ? (assetScope ?? undefined) : undefined,
+        },
         ids: [...selectedIds],
+        includeOriginals,
       });
       setExportOpen(false);
-      toast.success("Export download started");
+      toast.success("The export is downloading");
     } catch (e) {
       toast.error(`Export failed: ${(e as Error).message}`);
     } finally {
@@ -311,45 +349,67 @@ export default function FindingsPage() {
   groupFindingsRef.current = groupFindings;
   visibleGroupKeysRef.current = new Set(groups.map(findingGroupKey));
 
-  // The asset view's right-hand list = the flat list + a filter for the selected subtree, so both views share one list state.
+  // The asset view's right-hand list is the flat list plus the selected subtree filter, so both views share one list state.
   const activeAssetScope = view === "asset" ? assetScope : null;
 
-  // loadFlat fetches the flat view's current page; the task filter goes to the backend, sharing the same filter set as the grouped view.
+  // loadFlat fetches the flat view's current page; the task filter is applied by the backend and shared with the grouped view.
   const loadFlat = React.useCallback(async () => {
     const requestFilter = filterFingerprint;
     if (activeFilterFingerprint.current !== requestFilter) return;
     const request = ++flatRequest.current;
     setFlat((current) => ({ ...current, loading: true }));
     try {
-      const result = await api.findingsPage({
-        page: flatPage,
-        pageSize: flatPageSize,
-        severity,
-        status,
-        vulnclass,
-        task,
-        query,
-        sort,
-        assetScope: activeAssetScope ?? undefined,
-      });
+      const result = await api.findingCases(
+        {
+          page: flatPage,
+          pageSize: flatPageSize,
+          severity,
+          status,
+          vulnclass,
+          task,
+          query,
+          sort,
+          assetScope: activeAssetScope ?? undefined,
+          ...dateRange,
+        },
+        true,
+      );
       if (request !== flatRequest.current || activeFilterFingerprint.current !== requestFilter) return;
-      setFlat({ items: result.items, total: result.total, loaded: true, loading: false });
+      setFlat({
+        caseRows: result.items,
+        items: result.items.flatMap((row) => (row.finding ? [row.finding] : [])),
+        total: result.total,
+        loaded: true,
+        loading: false,
+      });
     } catch {
       if (request !== flatRequest.current || activeFilterFingerprint.current !== requestFilter) return;
       // Polling keeps the last successful snapshot visible.
       setFlat((current) => ({ ...current, loading: false }));
     }
-  }, [activeAssetScope, filterFingerprint, flatPage, flatPageSize, severity, status, vulnclass, task, query, sort]);
+  }, [
+    activeAssetScope,
+    dateRange,
+    filterFingerprint,
+    flatPage,
+    flatPageSize,
+    severity,
+    status,
+    vulnclass,
+    task,
+    query,
+    sort,
+  ]);
 
-  // loadAssetTree fetches the whole asset tree. The tree doesn't change with the selected node (otherwise
-  // picking one would collapse it into a single chain), so no assetScope here.
+  // loadAssetTree fetches the whole asset tree. The tree does not change with the selected node
+  // (otherwise one click would collapse it to a single chain), so no assetScope here.
   const loadAssetTree = React.useCallback(async () => {
     const requestFilter = filterFingerprint;
     if (activeFilterFingerprint.current !== requestFilter) return;
     const request = ++assetTreeRequest.current;
     setAssetTree((current) => ({ ...current, loading: true }));
     try {
-      const result = await api.findingAssetTree({ severity, status, vulnclass, task, query, sort });
+      const result = await api.findingAssetTree({ severity, status, vulnclass, task, query, sort, ...dateRange });
       if (request !== assetTreeRequest.current || activeFilterFingerprint.current !== requestFilter) return;
       setAssetTree({
         nodes: result.nodes ?? [],
@@ -362,9 +422,9 @@ export default function FindingsPage() {
     } catch (e) {
       if (request !== assetTreeRequest.current || activeFilterFingerprint.current !== requestFilter) return;
       setAssetTree((current) => ({ ...current, loading: false }));
-      toast.error(`Failed to load the asset tree: ${(e as Error).message}`);
+      toast.error(`Could not load the asset tree: ${(e as Error).message}`);
     }
-  }, [filterFingerprint, severity, status, vulnclass, task, query, sort]);
+  }, [dateRange, filterFingerprint, severity, status, vulnclass, task, query, sort]);
 
   const refreshGroups = React.useCallback(async () => {
     const requestFilter = filterFingerprint;
@@ -380,6 +440,7 @@ export default function FindingsPage() {
         task,
         query,
         sort,
+        ...dateRange,
       });
       if (request !== groupsRequest.current || activeFilterFingerprint.current !== requestFilter) return;
       setGroups(result.items);
@@ -388,7 +449,7 @@ export default function FindingsPage() {
     } catch {
       // Polling keeps the last successful snapshot visible.
     }
-  }, [filterFingerprint, page, pageSize, severity, status, vulnclass, task, query, sort]);
+  }, [dateRange, filterFingerprint, page, pageSize, severity, status, vulnclass, task, query, sort]);
 
   const loadGroup = React.useCallback(
     async (key: string, groupPage: number, groupPageSize: number) => {
@@ -399,6 +460,7 @@ export default function FindingsPage() {
       setGroupFindings((current) => ({
         ...current,
         [key]: {
+          caseRows: current[key]?.caseRows ?? [],
           items: current[key]?.items ?? [],
           total: current[key]?.total ?? 0,
           page: groupPage,
@@ -408,21 +470,26 @@ export default function FindingsPage() {
         },
       }));
       try {
-        const result = await api.findingsPage({
-          page: groupPage,
-          pageSize: groupPageSize,
-          severity,
-          status,
-          vulnclass,
-          task: key,
-          query,
-          sort,
-        });
+        const result = await api.findingCases(
+          {
+            page: groupPage,
+            pageSize: groupPageSize,
+            severity,
+            status,
+            vulnclass,
+            task: key,
+            query,
+            sort,
+            ...dateRange,
+          },
+          true,
+        );
         if (groupRequests.current[key] !== request || activeFilterFingerprint.current !== requestFilter) return;
         setGroupFindings((current) => ({
           ...current,
           [key]: {
-            items: result.items,
+            caseRows: result.items,
+            items: result.items.flatMap((row) => (row.finding ? [row.finding] : [])),
             total: result.total,
             page: result.page,
             pageSize: result.page_size,
@@ -436,6 +503,7 @@ export default function FindingsPage() {
           ...current,
           [key]: {
             ...(current[key] ?? {
+              caseRows: [],
               items: [],
               total: 0,
               page: groupPage,
@@ -447,7 +515,7 @@ export default function FindingsPage() {
         }));
       }
     },
-    [filterFingerprint, severity, status, vulnclass, query, sort],
+    [dateRange, filterFingerprint, severity, status, vulnclass, query, sort],
   );
 
   React.useEffect(() => {
@@ -473,17 +541,17 @@ export default function FindingsPage() {
     [expandedGroups, groupFindings, loadGroup],
   );
 
-  // Refresh the current view after an inline mutation: the flat view reloads its page, the grouped view refreshes group headers + the finding's group.
+  // After an inline change, refresh the current view: the flat view re-fetches its page, the grouped view the group header plus the group holding the finding.
   const refreshAfterMutation = React.useCallback(
     (finding: Finding, removed = false) => {
       if (view === "asset") {
-        // The asset view doesn't poll, so recount the tree after a mutation too.
+        // The asset view does not poll, so recompute the tree counts after a change.
         void loadFlat();
         void loadAssetTree();
         return;
       }
       if (view === "flat") {
-        // When the last page is emptied, the out-of-range correction effect rolls the page number back and reloads.
+        // Emptying the last page lets the out-of-range effect step back a page and reload.
         void loadFlat();
         return;
       }
@@ -508,31 +576,31 @@ export default function FindingsPage() {
     setGroupFindings({});
     setFlatPage(1);
     setFlat(EMPTY_FLAT_STATE);
-    // Filters change the tree too; the previously selected node may no longer be in it, so fall back to "All assets".
+    // A filter change changes the tree too, so a previously selected node may be gone; fall back to all assets.
     setAssetScope(null);
     setAssetTree(EMPTY_ASSET_TREE);
   }, [filterFingerprint]);
 
-  // Switching asset nodes means a different result set; go back to page one.
+  // A different asset node means a different result set, so go back to page one.
   React.useEffect(() => {
     void assetScope;
     setFlatPage(1);
   }, [assetScope]);
 
-  // The asset tree is queried once on view entry / filter change (plus actively re-pulled by
-  // refreshAfterMutation after this page mutates a finding); no polling.
+  // The asset tree is queried on entering the view and on a filter change (plus whenever
+  // refreshAfterMutation re-fetches it after this page changed a finding); it is never polled.
   React.useEffect(() => {
     if (!preferencesHydrated || view !== "asset") return;
-    void activeRetestFingerprint; // a finished retest may change asset counts under the status filter.
+    void activeRetestFingerprint; // A finished retest can change the asset counts under a status filter.
     void loadAssetTree();
   }, [activeRetestFingerprint, loadAssetTree, preferencesHydrated, view]);
 
-  // Poll only the current view: the flat view refreshes its page, the grouped view refreshes group headers and every expanded group (their paginations are independent).
-  // The asset view queries once (see the return below); its left tree is a navigation structure, no need to recompute it every 5 seconds.
-  // Wait for preferences to hydrate before the first request, otherwise one fetch fires with the default view/filters for nothing.
+  // Poll only the current view: the flat view its page, the grouped view the headers and each expanded group (whose pagers are independent).
+  // The asset view is queried once (see the return below); its left tree is navigation, not worth recomputing every 5 seconds.
+  // Wait for preferences to hydrate before the first request, or the default view/filter would be fetched for nothing.
   React.useEffect(() => {
     if (!preferencesHydrated) return;
-    void activeRetestFingerprint; // including the non-polling asset view, refresh triage status after a retest finishes.
+    void activeRetestFingerprint; // The asset view, polled irregularly, also refreshes its triage state after a retest.
     const refresh = () => {
       if (view === "flat" || view === "asset") {
         if (!flatStateRef.current.loading) void loadFlat();
@@ -629,16 +697,16 @@ export default function FindingsPage() {
     [refreshAfterMutation, setFindings, status],
   );
 
-  // The inline expanded detailed-report cache is keyed by the globally stable row key. report is long-form
-  // Markdown the list query doesn't include, so it is fetched once by finding_id on expand; done with empty text = no report yet.
+  // The inline detailed-report cache is keyed by a globally stable row key. report is a long Markdown
+  // body that list queries omit, so it is fetched once per finding_id on expand; done with empty text = no report.
   const [reports, setReports] = React.useState<Record<string, FindingReport>>({});
 
-  // Inline editable buffer: the expanded row's name/category/severity, initialized from the row on expand and cleared on collapse.
-  // Only one row expands at a time, so one buffer suffices.
+  // Inline edit buffer: the expanded row's name / class / severity, seeded from that row on expand and cleared on collapse.
+  // Only one row expands at a time, so one buffer is enough.
   const [edit, setEdit] = React.useState<FindingEdit | null>(null);
   const [saving, setSaving] = React.useState(false);
 
-  // toggle expands/collapses a row; a fresh expand initializes the edit buffer and (if not yet fetched) pulls the report cache once by finding_id.
+  // toggle expands/collapses a row; on expand it seeds the edit buffer and (when not cached) fetches the report once by finding_id.
   const toggleRow = React.useCallback(
     (f: Finding) => {
       const key = findingRowKey(f);
@@ -660,7 +728,7 @@ export default function FindingsPage() {
     [expanded, reports],
   );
 
-  // saveEdit saves the expanded row's name/category/severity, writes back to the local list and refreshes stats (the category dropdown / severity counts may change).
+  // saveEdit stores the expanded row's name / class / severity, writes it back locally and refreshes the stats (the class list and severity counts can change).
   const saveEdit = React.useCallback(
     async (f: Finding) => {
       if (!f.finding_id || !edit) return;
@@ -695,7 +763,7 @@ export default function FindingsPage() {
     [edit, refreshAfterMutation, setFindings],
   );
 
-  // deleteFinding deletes one vulnerability (with confirmation): on success it removes it from the list, collapses the row, and refreshes stats.
+  // deleteFinding removes a finding (with a confirmation): on success it drops the row, collapses it and refreshes the stats.
   const deleteFinding = React.useCallback(
     async (f: Finding) => {
       if (!f.finding_id) return;
@@ -711,7 +779,7 @@ export default function FindingsPage() {
         setFlat((cur) => ({ ...cur, total: Math.max(0, cur.total - 1) }));
         const rowKey = findingRowKey(f);
         setExpanded((cur) => (cur === rowKey ? null : cur));
-        toast.success("Vulnerability deleted");
+        toast.success("Finding deleted");
         api
           .findingStats()
           .then(setStats)
@@ -738,7 +806,7 @@ export default function FindingsPage() {
       const result = await api.deepenFinding(deepenFinding.finding_id, deepenDescription.trim());
       toast.success(
         result.queued
-          ? `Deepen intent #${result.intent_id} has entered the task queue`
+          ? `Deepen intent #${result.intent_id} is queued`
           : `Created high-priority worker intent #${result.intent_id}`,
       );
       refreshAfterMutation(deepenFinding);
@@ -752,17 +820,23 @@ export default function FindingsPage() {
   }
 
   const statCards = [
-    { label: "Total findings", value: stats.total, icon: BugIcon },
-    { label: "Pending", value: stats.pending, tone: "text-amber-500", icon: ClockIcon },
-    { label: "Critical", value: stats.critical, tone: "text-rose-600", icon: ShieldAlertIcon },
-    { label: "High", value: stats.high, tone: "text-red-500", icon: TriangleAlertIcon },
-    { label: "Medium", value: stats.medium, tone: "text-amber-500", icon: TriangleAlertIcon },
-    { label: "Low", value: stats.low, tone: "text-slate-500", icon: InfoIcon },
+    { label: "Distinct findings", value: stats.distinct?.total ?? stats.total, icon: BugIcon },
+    { label: "Reports", value: stats.total, tone: "text-amber-500", icon: ClockIcon },
+    {
+      label: "Critical",
+      value: stats.distinct?.critical ?? stats.critical,
+      tone: "text-rose-600",
+      icon: ShieldAlertIcon,
+    },
+    { label: "High", value: stats.distinct?.high ?? stats.high, tone: "text-red-500", icon: TriangleAlertIcon },
+    { label: "Medium", value: stats.distinct?.medium ?? stats.medium, tone: "text-amber-500", icon: TriangleAlertIcon },
+    { label: "Low", value: stats.distinct?.low ?? stats.low, tone: "text-slate-500", icon: InfoIcon },
   ];
 
-  // The "current filter" count in the export dialog: both views share the same filters, only the counting source differs.
-  // The flat and asset views share the flat list state; the grouped view's figure comes from the group API's finding_total.
-  const filteredTotal = view === "grouped" ? total : flat.total;
+  // The "current filter" count in the export dialog: both views share the filter, only the counting source differs.
+  // Flat and asset views share the flat list state; the grouped view takes its count from the group endpoint's finding_total.
+  const [caseTotal, setCaseTotal] = React.useState(0);
+  const filteredTotal = view === "cases" ? caseTotal : view === "grouped" ? total : flat.total;
   const assetPath = React.useMemo(
     () => (view === "asset" ? assetPathOf(assetTree.nodes, assetScope) : []),
     [assetScope, assetTree.nodes, view],
@@ -786,7 +860,7 @@ export default function FindingsPage() {
     onDelete: deleteFinding,
   };
 
-  // The flat view and the asset view's right side are the same table + pagination, differing only in filter conditions.
+  // The flat view and the asset view's right-hand side are the same table and pager, only the filter differs.
   const flatListCard = (
     <Card className="gap-0 py-0">
       <CardContent className="px-0">
@@ -796,7 +870,13 @@ export default function FindingsPage() {
           </div>
         ) : (
           <>
-            <FindingsTable items={flat.items} selectAllLabel="Select all on this page" {...rowProps} />
+            <FindingsTable
+              items={flat.items}
+              caseRows={flat.caseRows}
+              presentation={view === "asset" ? "asset" : "records"}
+              selectAllLabel="Select everything on this page"
+              {...rowProps}
+            />
             <TablePagination
               page={flatPage}
               pageSize={flatPageSize}
@@ -819,11 +899,12 @@ export default function FindingsPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Findings</h1>
-          <p className="text-muted-foreground text-sm">Cross-task vulnerability overview</p>
+          <p className="text-muted-foreground text-sm">Findings across every task</p>
         </div>
         <Tabs value={view} onValueChange={(v) => setView(v as FindingView)}>
           <TabsList>
-            <TabsTrigger value="flat">All findings</TabsTrigger>
+            <TabsTrigger value="cases">By finding</TabsTrigger>
+            <TabsTrigger value="flat">Original reports</TabsTrigger>
             <TabsTrigger value="grouped">By task</TabsTrigger>
             <TabsTrigger value="asset">By asset</TabsTrigger>
           </TabsList>
@@ -847,14 +928,14 @@ export default function FindingsPage() {
           })}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <InputGroup className="w-full sm:w-72">
+        <div className="scrollbar-none flex min-w-0 flex-nowrap items-center gap-2 overflow-x-auto pb-1">
+          <InputGroup className="w-72 shrink-0">
             <InputGroupInput
               type="search"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search findings"
-              aria-label="Search findings"
+              placeholder="Search the findings"
+              aria-label="Search the findings"
             />
             <InputGroupAddon>
               <SearchIcon aria-hidden="true" />
@@ -869,23 +950,15 @@ export default function FindingsPage() {
             size="sm"
             spacing={0}
           >
-            {(
-              [
-                ["all", "All"],
-                ["critical", "Critical"],
-                ["high", "High"],
-                ["medium", "Medium"],
-                ["low", "Low"],
-              ] as const
-            ).map(([val, label]) => (
-              <ToggleGroupItem key={val} value={val} aria-label={`Filter by ${label} severity`}>
+            {SEVERITY_FILTER_OPTIONS.map(([val, label]) => (
+              <ToggleGroupItem key={val} value={val} aria-label={`Filter by ${label}`}>
                 {label}
               </ToggleGroupItem>
             ))}
           </ToggleGroup>
 
           <Select value={status} onValueChange={(v) => setStatus(v as "all" | FindingStatus)}>
-            <SelectTrigger size="sm" className="w-32">
+            <SelectTrigger size="sm" className="w-32 shrink-0">
               <SelectValue placeholder="Status" />
             </SelectTrigger>
             <SelectContent>
@@ -899,11 +972,11 @@ export default function FindingsPage() {
           </Select>
 
           <Select value={vulnclass} onValueChange={setVulnclass}>
-            <SelectTrigger size="sm" className="w-40">
-              <SelectValue placeholder="Vulnerability type" />
+            <SelectTrigger size="sm" className="w-40 shrink-0">
+              <SelectValue placeholder="Class" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">All types</SelectItem>
+              <SelectItem value="all">All classes</SelectItem>
               {stats.vulnclasses.map((vc) => (
                 <SelectItem key={vc} value={vc}>
                   {vc}
@@ -913,7 +986,7 @@ export default function FindingsPage() {
           </Select>
 
           <Select value={task} onValueChange={setTask}>
-            <SelectTrigger size="sm" className="w-48">
+            <SelectTrigger size="sm" className="w-48 shrink-0">
               <SelectValue placeholder="Task" />
             </SelectTrigger>
             <SelectContent>
@@ -939,8 +1012,10 @@ export default function FindingsPage() {
             </SelectContent>
           </Select>
 
+          <FindingDateFilter value={dateRange} onChange={setDateRange} />
+
           <Select value={sort} onValueChange={(v) => setSort(v as "severity" | "time")}>
-            <SelectTrigger size="sm" className="w-36">
+            <SelectTrigger size="sm" className="w-36 shrink-0">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -949,10 +1024,28 @@ export default function FindingsPage() {
             </SelectContent>
           </Select>
 
-          <div className="ml-auto flex items-center gap-3">
+          <div className="ml-auto flex shrink-0 items-center gap-3">
             {selectedIds.size > 0 && (
               <span className="text-xs text-muted-foreground tabular-nums">{selectedIds.size} selected</span>
             )}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={reviewing || selectedIds.size === 0}
+              onClick={async () => {
+                setReviewing(true);
+                try {
+                  await api.reviewFindingCases([...selectedIds]);
+                  toast.success("Submitted; one consolidation run per task");
+                } catch (e) {
+                  toast.error((e as Error).message);
+                } finally {
+                  setReviewing(false);
+                }
+              }}
+            >
+              {reviewing ? <Spinner /> : null}Consolidate the {selectedIds.size} selected
+            </Button>
             <Button size="sm" variant="outline" onClick={openExport}>
               <DownloadIcon /> Export
             </Button>
@@ -1008,19 +1101,28 @@ export default function FindingsPage() {
                     </button>
                   </React.Fragment>
                 ))}
-                <span className="ml-auto shrink-0 text-xs tabular-nums">{flat.total} in total</span>
+                <span className="ml-auto shrink-0 text-xs tabular-nums">{flat.total} total</span>
               </div>
               {flatListCard}
             </div>
           </div>
         )}
 
+        {view === "cases" && (
+          <FindingCaseList
+            onTotal={setCaseTotal}
+            query={{ severity, status, vulnclass, task, query, sort, ...dateRange }}
+            selectedIds={selectedIds}
+            onSelect={toggleSelected}
+          />
+        )}
         {view === "grouped" && (
           <div className="flex flex-col gap-3">
             {groups.map((group) => {
               const key = findingGroupKey(group);
               const groupOpen = expandedGroups.has(key);
               const state = groupFindings[key] ?? {
+                caseRows: [],
                 items: [],
                 total: group.count,
                 page: 1,
@@ -1053,7 +1155,7 @@ export default function FindingsPage() {
                                 : `Task #${group.task_id}`}
                           </CardTitle>
                           <CardDescription className="truncate" title={group.task_description}>
-                            {group.task_description || "Source task unavailable"}
+                            {group.task_description || "source task unavailable"}
                           </CardDescription>
                         </div>
                       </button>
@@ -1076,7 +1178,7 @@ export default function FindingsPage() {
                           <Button size="icon-sm" variant="ghost" asChild>
                             <Link
                               href={`/function/tasks/detail?id=${group.task_id}`}
-                              aria-label={`View task #${group.task_id}`}
+                              aria-label={`Open task #${group.task_id}`}
                             >
                               <ArrowUpRightIcon />
                             </Link>
@@ -1093,7 +1195,13 @@ export default function FindingsPage() {
                         </div>
                       ) : (
                         <>
-                          <FindingsTable items={state.items} selectAllLabel="Select all on this page in this group" {...rowProps} />
+                          <FindingsTable
+                            items={state.items}
+                            caseRows={state.caseRows}
+                            presentation="task"
+                            selectAllLabel="Select everything on this page of the group"
+                            {...rowProps}
+                          />
                           <TablePagination
                             page={state.page}
                             pageSize={state.pageSize}
@@ -1110,7 +1218,9 @@ export default function FindingsPage() {
             })}
             {groups.length === 0 && (
               <Card>
-                <CardContent className="py-12 text-center text-sm text-muted-foreground">No matching findings.</CardContent>
+                <CardContent className="py-12 text-center text-sm text-muted-foreground">
+                  No matching findings.
+                </CardContent>
               </Card>
             )}
             <TablePagination
@@ -1159,25 +1269,26 @@ export default function FindingsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Deepen exploitation</DialogTitle>
+            <DialogTitle>Deepen this finding</DialogTitle>
             <DialogDescription className="break-words">
-              A priority-10 worker intent will be created in the original task #{deepenFinding?.task_id} to run secondary verification based on this vulnerability:
+              A priority-10 worker intent will be created in task #{deepenFinding?.task_id} to verify this finding
+              further:
               {deepenFinding?.name || deepenFinding?.vulnclass || deepenFinding?.summary}
             </DialogDescription>
           </DialogHeader>
           <FieldGroup>
             <Field>
-              <FieldLabel htmlFor="finding-deepen-description">Exploitation description</FieldLabel>
+              <FieldLabel htmlFor="finding-deepen-description">What to exploit</FieldLabel>
               <Textarea
                 id="finding-deepen-description"
                 value={deepenDescription}
                 onChange={(event) => setDeepenDescription(event.target.value)}
                 maxLength={4000}
-                placeholder="Describe the exploitation path to verify, boundary conditions, targets, or expected evidence"
+                placeholder="The exploitation path, boundary conditions, target or expected evidence to verify"
                 disabled={deepening}
               />
               <FieldDescription className="flex justify-between gap-3">
-                <span>The new intent inherits this vulnerability's asset anchors.</span>
+                <span>The new intent inherits this finding's asset anchors.</span>
                 <span className="shrink-0 tabular-nums">{deepenDescription.length} / 4000</span>
               </FieldDescription>
             </Field>
@@ -1195,7 +1306,7 @@ export default function FindingsPage() {
             </Button>
             <Button onClick={submitDeepen} disabled={deepening || !deepenDescription.trim()}>
               {deepening && <Spinner data-icon="inline-start" />}
-              Create deepen intent
+              Create the intent
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1205,41 +1316,51 @@ export default function FindingsPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Export findings</DialogTitle>
-            <DialogDescription>Choose the export scope and format; the browser downloads the file automatically once generated.</DialogDescription>
+            <DialogDescription>Pick a scope and a format; the browser downloads the result.</DialogDescription>
           </DialogHeader>
 
           <div className="flex flex-col gap-5 py-1">
             <div className="flex flex-col gap-2">
-              <span className="text-xs text-muted-foreground">Export scope</span>
+              <span className="text-xs text-muted-foreground">Scope</span>
               <RadioGroup value={exportScope} onValueChange={(v) => setExportScope(v as typeof exportScope)}>
                 <label htmlFor="export-scope-filtered" className="flex items-center gap-2 text-sm">
-                  <RadioGroupItem id="export-scope-filtered" value="filtered" /> Export the current filter results ({filteredTotal}{" "}
-                  items)
+                  <RadioGroupItem id="export-scope-filtered" value="filtered" /> The current filter ({filteredTotal} )
                 </label>
                 <label htmlFor="export-scope-all" className="flex items-center gap-2 text-sm">
-                  <RadioGroupItem id="export-scope-all" value="all" /> Export all
+                  <RadioGroupItem id="export-scope-all" value="all" /> Everything
                 </label>
                 <label
                   htmlFor="export-scope-selected"
                   className={cn("flex items-center gap-2 text-sm", selectedIds.size === 0 && "text-muted-foreground")}
                 >
                   <RadioGroupItem id="export-scope-selected" value="selected" disabled={selectedIds.size === 0} />
-                  Export the {selectedIds.size} selected items
+                  The {selectedIds.size} selected
                 </label>
               </RadioGroup>
             </div>
 
             <div className="flex flex-col gap-2">
-              <span className="text-xs text-muted-foreground">Export format</span>
+              <span className="text-xs text-muted-foreground">Format</span>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="include-original-reports"
+                  checked={includeOriginals}
+                  onCheckedChange={(v) => setIncludeOriginals(v === true)}
+                />
+                <label htmlFor="include-original-reports" className="text-sm">
+                  Include the original reports (by default each case contributes one unified report)
+                </label>
+              </div>
               <RadioGroup value={exportFormat} onValueChange={(v) => setExportFormat(v as typeof exportFormat)}>
                 <label htmlFor="export-format-md-single" className="flex items-center gap-2 text-sm">
-                  <RadioGroupItem id="export-format-md-single" value="md-single" /> Markdown summary report (a single .md file)
+                  <RadioGroupItem id="export-format-md-single" value="md-single" /> Markdown summary (a single .md)
                 </label>
                 <label htmlFor="export-format-md-zip" className="flex items-center gap-2 text-sm">
-                  <RadioGroupItem id="export-format-md-zip" value="md-zip" /> Markdown per finding (one .md per vulnerability, packaged as .zip)
+                  <RadioGroupItem id="export-format-md-zip" value="md-zip" /> Markdown per finding (one .md each,
+                  zipped)
                 </label>
                 <label htmlFor="export-format-csv" className="flex items-center gap-2 text-sm">
-                  <RadioGroupItem id="export-format-csv" value="csv" /> CSV table (.csv)
+                  <RadioGroupItem id="export-format-csv" value="csv" /> CSV (.csv)
                 </label>
                 <label htmlFor="export-format-json" className="flex items-center gap-2 text-sm">
                   <RadioGroupItem id="export-format-json" value="json" /> JSON (.json)

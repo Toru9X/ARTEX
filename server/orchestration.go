@@ -11,6 +11,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -441,6 +442,22 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			nodeID := parseProfileID(a.FindingID) // reuses the "number or numeric string" parser
 			if nodeID <= 0 {
 				return actool.Errorf("invalid finding_id"), nil
+			}
+			// A historical consolidation run may read the originals but never
+			// rewrite them, so the scope check comes before the write.
+			fid, err := s.m.pg.FindingIDByNodeID(nodeID)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if fid > 0 {
+				if err := s.checkCaseReviewScope(ctx, "update_finding_report", findingCaseRequest{FindingID: json.RawMessage(i64s(fid))}); err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				if conversationID := intercept.ConvIDFromContext(ctx); conversationID > 0 {
+					if err := s.m.pg.SetFindingReportConversationID(fid, conversationID); err != nil {
+						return actool.Errorf("could not link the report conversation: " + err.Error()), nil
+					}
+				}
 			}
 			n, err := s.m.pg.SetFindingReportVersionByNodeID(ctx, nodeID, a.Report, a.EvidenceVersion)
 			if err != nil {

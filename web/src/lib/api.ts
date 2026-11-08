@@ -39,6 +39,10 @@ import type {
   ExplorationNodeQuery,
   Finding,
   FindingAssetTree,
+  FindingCaseDetail,
+  FindingCasePage,
+  FindingCaseReviewRun,
+  FindingCaseSuggestion,
   FindingDeepenResponse,
   FindingGroupsPage,
   FindingQuery,
@@ -269,6 +273,9 @@ function findingFilterParams(q: Omit<FindingQuery, "page" | "pageSize">): URLSea
   if (q.task && q.task !== "all") p.set("task_id", q.task);
   if (q.query?.trim()) p.set("q", q.query.trim());
   if (q.sort) p.set("sort", q.sort);
+  if (q.timeDirection) p.set("time_direction", q.timeDirection);
+  if (q.from) p.set("from", q.from);
+  if (q.to) p.set("to", q.to);
   if (q.assetScope) p.set("asset_scope", q.assetScope);
   return p;
 }
@@ -615,6 +622,51 @@ export const api = {
   // findings and their ancestors, nodes carrying subtree aggregate counts. Not paginated — the tree is a navigation structure, fetched in one go.
   findingAssetTree: (q: Omit<FindingQuery, "page" | "pageSize">) =>
     get<FindingAssetTree>(`/exploration/findings/asset-tree?${findingFilterParams(q).toString()}`),
+  // ---- finding cases ----
+  findingCases: (q: FindingQuery, originalRows = false) => {
+    const p = findingFilterParams(q);
+    p.set("page", String(q.page));
+    p.set("limit", String(q.pageSize));
+    if (originalRows) p.set("original_rows", "1");
+    return get<FindingCasePage>(`/exploration/finding-cases?${p}`);
+  },
+  getFindingCase: (id: string, contextTask?: string) =>
+    get<FindingCaseDetail>(
+      `/exploration/finding-cases/${id}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+    ),
+  findingCaseMembers: (id: string, page = 1, contextTask?: string, pageSize = 20) =>
+    get<FindingsPage>(
+      `/exploration/finding-cases/${id}/members?page=${page}&limit=${pageSize}${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`,
+    ),
+  removeFindingCaseMember: (id: string, fid: string, reason: string) =>
+    http<{ ok: boolean }>(`/exploration/finding-cases/${id}/members/${fid}`, {
+      method: "DELETE",
+      body: JSON.stringify({ reason }),
+    }),
+  findingCaseSuggestions: (task?: string) =>
+    get<FindingCaseSuggestion[]>(
+      `/exploration/finding-case-suggestions${task ? `?task_id=${encodeURIComponent(task)}` : ""}`,
+    ),
+  resolveFindingCaseSuggestion: (id: string, accept: boolean, excludeIds?: string[]) =>
+    post<{ case_id: string }>(`/exploration/finding-case-suggestions/${id}`, {
+      accept,
+      ...(excludeIds && excludeIds.length > 0 ? { exclude_ids: excludeIds } : {}),
+    }),
+  reviewFindingCases: (ids: string[]) =>
+    post<{ runs: { conversation_id: number; task_id: string }[] }>("/exploration/finding-case-review", {
+      finding_ids: ids,
+    }),
+  regenerateFindingCase: (id: string, contextTask?: string) =>
+    post<{ runs: { conversation_id: number; task_id: string }[] }>(
+      `/exploration/finding-case-review${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { case_id: id },
+    ),
+  findingCaseReviewRuns: () => get<FindingCaseReviewRun[]>("/exploration/finding-case-review"),
+  generateFindingReport: (id: string) =>
+    post<{ queued: boolean; agent_key: "reporter"; finding_id: number; finding_node_id: number }>(
+      `/exploration/findings/${encodeURIComponent(id)}/generate-report`,
+      {},
+    ),
   findingStats: () => get<FindingStats>("/exploration/findings/stats"),
   // exportFindings triggers the findings page export and downloads the file. scope=selected
   // sends ids (a finding_id list); scope=filtered sends the current filters (the FindingQuery filter fields); scope=all ignores filters.
@@ -623,8 +675,14 @@ export const api = {
     scope: "filtered" | "all" | "selected";
     filters?: Omit<FindingQuery, "page" | "pageSize">;
     ids?: string[];
+    // Consolidated is the default: a case is exported as one unified row, with
+    // its members included only when includeOriginals is set.
+    includeOriginals?: boolean;
+    consolidated?: boolean;
   }) => {
     const p = new URLSearchParams({ format: opts.format, scope: opts.scope });
+    p.set("mode", opts.consolidated === false ? "raw" : "consolidated");
+    p.set("include_originals", String(opts.includeOriginals ?? false));
     if (opts.scope === "selected") {
       p.set("ids", (opts.ids ?? []).join(","));
     } else if (opts.scope === "filtered" && opts.filters) {

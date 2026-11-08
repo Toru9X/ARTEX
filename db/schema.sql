@@ -1605,3 +1605,146 @@ CREATE INDEX IF NOT EXISTS idx_task_intelligence_assets ON task_intelligence USI
 -- Optional derived credential presentation; the raw intelligence row stays
 -- authoritative, so a failed or stale analysis never loses the original.
 ALTER TABLE task_intelligence ADD COLUMN IF NOT EXISTS credential_analysis JSONB;
+
+-- A case collects repeated observations of one defect without rewriting findings.
+CREATE TABLE IF NOT EXISTS finding_cases (
+    id BIGSERIAL PRIMARY KEY,
+    task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+    origin_task_id BIGINT NOT NULL,
+    title TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT '',
+    severity_reason TEXT NOT NULL DEFAULT '',
+    report TEXT NOT NULL DEFAULT '',
+    version BIGINT NOT NULL DEFAULT 1,
+    report_version BIGINT NOT NULL DEFAULT 0,
+    active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS finding_case_members (
+    finding_id BIGINT PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,
+    case_id BIGINT NOT NULL REFERENCES finding_cases(id),
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_finding_case_members_case ON finding_case_members(case_id);
+CREATE TABLE IF NOT EXISTS finding_case_events (
+    id BIGSERIAL PRIMARY KEY,
+    case_id BIGINT NOT NULL REFERENCES finding_cases(id),
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    finding_ids JSONB NOT NULL DEFAULT '[]',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS finding_case_suggestions (
+    id BIGSERIAL PRIMARY KEY,
+    task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    left_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    right_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(left_id,right_id),
+    CHECK(left_id < right_id)
+);
+-- A suggestion is a group.  left_id/right_id remain compatibility anchors for
+-- old clients and are kept at the two smallest surviving member ids.
+ALTER TABLE finding_case_suggestions DROP CONSTRAINT IF EXISTS finding_case_suggestions_left_id_right_id_key;
+CREATE TABLE IF NOT EXISTS finding_case_suggestion_members (
+    suggestion_id BIGINT NOT NULL REFERENCES finding_case_suggestions(id) ON DELETE CASCADE,
+    finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    PRIMARY KEY (suggestion_id, finding_id)
+);
+CREATE INDEX IF NOT EXISTS idx_finding_case_suggestion_members_finding
+    ON finding_case_suggestion_members(finding_id);
+INSERT INTO finding_case_suggestion_members(suggestion_id, finding_id)
+    SELECT id, left_id FROM finding_case_suggestions ON CONFLICT DO NOTHING;
+INSERT INTO finding_case_suggestion_members(suggestion_id, finding_id)
+    SELECT id, right_id FROM finding_case_suggestions ON CONFLICT DO NOTHING;
+-- Anchors have cascading foreign keys.  Re-anchor a group before an anchor
+-- finding is deleted so a 3+ member suggestion survives the cascade.
+CREATE OR REPLACE FUNCTION finding_case_suggestion_reanchor() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    sid BIGINT;
+    new_left BIGINT;
+    new_right BIGINT;
+BEGIN
+    FOR sid IN
+        SELECT id FROM finding_case_suggestions
+        WHERE left_id = OLD.id OR right_id = OLD.id
+    LOOP
+        SELECT min(m.finding_id) INTO new_left
+        FROM finding_case_suggestion_members m
+        JOIN findings f ON f.id = m.finding_id
+        WHERE m.suggestion_id = sid AND m.finding_id <> OLD.id;
+        SELECT min(m.finding_id) INTO new_right
+        FROM finding_case_suggestion_members m
+        JOIN findings f ON f.id = m.finding_id
+        WHERE m.suggestion_id = sid AND m.finding_id <> OLD.id
+          AND m.finding_id > new_left;
+        IF new_left IS NOT NULL AND new_right IS NOT NULL THEN
+            UPDATE finding_case_suggestions
+            SET left_id = new_left, right_id = new_right
+            WHERE id = sid;
+        END IF;
+    END LOOP;
+    RETURN OLD;
+END $$;
+DROP TRIGGER IF EXISTS finding_case_suggestion_reanchor ON findings;
+CREATE TRIGGER finding_case_suggestion_reanchor
+BEFORE DELETE ON findings FOR EACH ROW
+EXECUTE FUNCTION finding_case_suggestion_reanchor();
+-- Rejected/detached pairs are a durable human veto, also checked on group unions.
+CREATE TABLE IF NOT EXISTS finding_case_blocks (
+    left_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    right_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    PRIMARY KEY(left_id,right_id), CHECK(left_id < right_id)
+);
+CREATE OR REPLACE FUNCTION finding_case_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE cid BIGINT; remaining INTEGER;
+BEGIN
+    IF TG_TABLE_NAME = 'findings' THEN
+        IF OLD IS NOT DISTINCT FROM NEW THEN RETURN NEW; END IF;
+        SELECT case_id INTO cid FROM finding_case_members WHERE finding_id=NEW.id;
+    ELSE
+        cid := OLD.case_id;
+    END IF;
+    IF cid IS NOT NULL THEN
+        UPDATE finding_cases SET version=version+1 WHERE id=cid;
+        IF TG_OP='DELETE' THEN
+            SELECT count(*) INTO remaining FROM finding_case_members WHERE case_id=cid;
+            INSERT INTO finding_case_events(case_id,action,actor,reason,finding_ids)
+                VALUES(cid,'member_deleted','system','the member left the case or was deleted',jsonb_build_array(OLD.finding_id));
+            IF remaining < 2 THEN
+                UPDATE finding_cases SET active=false WHERE id=cid;
+                DELETE FROM finding_case_members WHERE case_id=cid;
+            END IF;
+        END IF;
+    END IF;
+    RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS finding_case_content_changed ON findings;
+CREATE TRIGGER finding_case_content_changed AFTER UPDATE ON findings
+FOR EACH ROW EXECUTE FUNCTION finding_case_changed();
+DROP TRIGGER IF EXISTS finding_case_member_deleted ON finding_case_members;
+CREATE TRIGGER finding_case_member_deleted AFTER DELETE ON finding_case_members
+FOR EACH ROW EXECUTE FUNCTION finding_case_changed();
+CREATE TABLE IF NOT EXISTS finding_case_review_runs (
+    conversation_id BIGINT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+    state TEXT NOT NULL DEFAULT 'queued',
+    error TEXT NOT NULL DEFAULT ''
+);
+
+ALTER TABLE finding_case_review_runs ADD COLUMN IF NOT EXISTS finding_ids JSONB NOT NULL DEFAULT '[]';
+
+ALTER TABLE finding_case_review_runs ADD COLUMN IF NOT EXISTS reviewed_ids JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE finding_case_review_runs ADD COLUMN IF NOT EXISTS conclusion JSONB NOT NULL DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS idx_finding_case_reviews_active_task ON finding_case_review_runs(task_id) WHERE state IN ('queued','running');
+
+-- A finding keeps a pointer to the conversation that wrote its report, so a
+-- regenerated report reuses the same session instead of starting a new one.
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_conversation_id BIGINT REFERENCES conversations(id) ON DELETE SET NULL;

@@ -9,6 +9,7 @@ export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 export const MAX_TASK_REMARK_RUNES = 2000;
 
 export interface Task {
+  distinct_findings?: FindingDistinctStats;
   id: string;
   name?: string; // optional task name; empty/absent = untitled, display falls back to the description
   remark?: string; // free-form operator note; empty/absent = none
@@ -497,6 +498,10 @@ export interface FindingAsset {
 }
 
 export interface Finding {
+  // Set when this finding belongs to a case; member_ids is set only on a
+  // consolidated export row, which stands for the case rather than one finding.
+  case_id?: string;
+  member_ids?: number[];
   traffic_count?: number;
   evidence_version?: number;
   report_evidence_version?: number;
@@ -510,6 +515,7 @@ export interface Finding {
   summary: string;
   evidence: string;
   report?: string; // detailed report (Markdown); returned only by the detail endpoint, empty in lists
+  report_conversation_id?: number;
   intent_id?: string;
   param_id?: string;
   task_id?: string;
@@ -558,6 +564,7 @@ export interface FindingDeepenResponse {
 
 // FindingStats is the whole-table findings aggregate (stat cards + vulnerability type dropdown), computed server-side, unaffected by pagination.
 export interface FindingStats {
+  distinct?: FindingDistinctStats;
   total: number;
   pending: number;
   critical: number;
@@ -587,6 +594,9 @@ export interface FindingQuery {
   task?: string; // task id; "all"/empty = no task filter
   query?: string;
   sort?: "severity" | "time";
+  timeDirection?: "asc" | "desc"; // Missing = newest first; secondary to severity when sort="severity".
+  from?: string; // ISO timestamp, inclusive
+  to?: string; // ISO timestamp, inclusive
   // asset tree node key; selecting a node selects its whole subtree. Empty = no asset filter.
   assetScope?: string;
 }
@@ -1583,6 +1593,81 @@ export interface ConvTokenSummary {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+}
+
+// ---- Finding cases (repeated reports of one defect, grouped) ----
+export interface FindingDistinctStats {
+  total: number;
+  reports: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  unassessed: number;
+}
+export interface FindingCase {
+  id: string;
+  task_id: string | null;
+  title: string;
+  reason: string;
+  severity: Severity | "";
+  severity_reason: string;
+  report?: string;
+  version: number;
+  report_version: number;
+  active: boolean;
+  count: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  created_at: string;
+}
+export interface FindingCaseListRow {
+  task_name?: string;
+  task_description?: string;
+  assets?: FindingAsset[];
+  asset_count?: number;
+  last_found_at?: string;
+  case?: FindingCase | null;
+  finding?: Finding;
+  matched_ids: number[];
+}
+export interface FindingCasePage {
+  matching_reports?: number;
+  items: FindingCaseListRow[];
+  total: number;
+  page: number;
+  page_size: number;
+  stats: FindingDistinctStats;
+}
+export interface FindingCaseEvent {
+  id: string;
+  action: string;
+  actor: string;
+  reason: string;
+  finding_ids: number[];
+  created_at: string;
+}
+export interface FindingCaseDetail {
+  case: FindingCase;
+  events: FindingCaseEvent[];
+}
+export interface FindingCaseSuggestion {
+  id: string;
+  task_id: string;
+  left_id: string;
+  right_id: string;
+  finding_ids: string[];
+  title: string;
+  reason: string;
+  state: string;
+}
+export interface FindingCaseReviewRun {
+  conversation_id: number;
+  task_id: string;
+  state: "queued" | "running" | "done" | "failed";
+  error: string;
 }
 
 // ---- Task intelligence (credentials / leads / sensitive data) ----

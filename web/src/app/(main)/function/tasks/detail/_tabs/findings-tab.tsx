@@ -4,22 +4,25 @@ import * as React from "react";
 
 import Link from "next/link";
 
-import { ArrowDownIcon, ArrowUpIcon, ArrowUpRightIcon, ChevronRightIcon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, ArrowUpRightIcon, ChevronRightIcon, SearchIcon } from "lucide-react";
 import { toast } from "sonner";
 
+import { FindingCaseList } from "@/components/finding-case-list";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger } from "@/components/ui/select";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/lib/api";
+import { type FindingSortField, filterAndSortFindings } from "@/lib/finding-severity";
 import { useStoredSortPreference } from "@/lib/sort-preference";
-import { statusMeta } from "@/lib/status";
-import type { Finding, FindingStatus } from "@/lib/types";
+import { SEVERITY_FILTER_OPTIONS, statusMeta } from "@/lib/status";
+import type { Finding, FindingStatus, Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type FindingSortField = "time";
-
-const FINDING_SORT_FIELDS: readonly FindingSortField[] = ["time"];
+const FINDING_SORT_FIELDS: readonly FindingSortField[] = ["time", "severity"];
 const FINDING_SORT_PREFERENCE_KEY = "artex_task_findings_sort";
 
 function findingLabel(finding: Finding): string {
@@ -138,6 +141,9 @@ function Row({
 }
 
 export function FindingsTab({ taskId }: { taskId: string }) {
+  const [severity, setSeverity] = React.useState<"all" | Severity>("all");
+  const [search, setSearch] = React.useState("");
+  const [query, setQuery] = React.useState("");
   const [findings, setFindings] = React.useState<Finding[]>([]);
   const [sortPreference, setSortPreference] = useStoredSortPreference(
     FINDING_SORT_PREFERENCE_KEY,
@@ -179,45 +185,152 @@ export function FindingsTab({ taskId }: { taskId: string }) {
     }
   }, []);
 
-  const items = findings
-    .filter((f) => f.task_id === taskId || f.inherited)
-    .sort((a, b) => {
-      const compared = Date.parse(a.ts) - Date.parse(b.ts);
-      if (compared !== 0) return sortPreference.direction === "asc" ? compared : -compared;
-      return b.id.localeCompare(a.id, undefined, { numeric: true });
-    });
+  // Discover inherited sources before filtering; finding-cases owns the case matching.
+  const taskFindings = findings.filter((f) => f.task_id === taskId || f.inherited);
+  const items = filterAndSortFindings(taskFindings, severity, sortPreference, query);
 
   return (
-    <Card className="overflow-hidden py-0">
-      <CardContent className="px-0">
-        <div className="flex items-center border-b px-4 py-2 text-xs text-muted-foreground">
-          <span className="min-w-0 flex-1">Vulnerabilities</span>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 outline-none focus-visible:underline"
-            aria-label={`Discovery time currently ${sortPreference.direction === "asc" ? "ascending" : "descending"}, click to toggle sort direction`}
-            onClick={() =>
-              setSortPreference((current) => ({
-                field: "time",
-                direction: current.direction === "asc" ? "desc" : "asc",
-              }))
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <ToggleGroup
+          type="single"
+          value={severity}
+          onValueChange={(value) => value && setSeverity(value as "all" | Severity)}
+          variant="outline"
+          size="sm"
+          spacing={0}
+        >
+          {SEVERITY_FILTER_OPTIONS.map(([val, label]) => (
+            <ToggleGroupItem key={val} value={val} aria-label={`Filter by ${label}`}>
+              {label}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
+        <Select
+          value={sortPreference.field}
+          onValueChange={(field) => {
+            if (field === "time" || field === "severity") {
+              setSortPreference((current) => ({ ...current, field }));
             }
-          >
-            <span>Discovery time</span>
-            {sortPreference.direction === "asc" ? (
-              <ArrowUpIcon className="size-3.5" />
-            ) : (
-              <ArrowDownIcon className="size-3.5" />
-            )}
-          </button>
+          }}
+        >
+          <SelectTrigger size="sm" className="w-36" aria-label="Sort findings by">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="time">Sort by time</SelectItem>
+            <SelectItem value="severity">Sort by severity</SelectItem>
+          </SelectContent>
+        </Select>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          aria-label={`${sortPreference.field === "severity" ? "Within a severity, discovery" : "Discovery"} time is currently ${sortPreference.direction === "asc" ? "ascending" : "descending"}; click to reverse it`}
+          onClick={() =>
+            setSortPreference((current) => ({
+              ...current,
+              direction: current.direction === "asc" ? "desc" : "asc",
+            }))
+          }
+        >
+          {sortPreference.direction === "asc" ? (
+            <ArrowUpIcon aria-hidden="true" />
+          ) : (
+            <ArrowDownIcon aria-hidden="true" />
+          )}
+          {sortPreference.field === "severity" ? "Within severity: " : ""}
+          {sortPreference.direction === "asc" ? "Oldest first" : "Newest first"}
+        </Button>
+        <form
+          className="flex w-full items-center gap-2 sm:w-auto"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setQuery(search.trim());
+          }}
+        >
+          <InputGroup className="flex-1 sm:w-72">
+            <InputGroupInput
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search the findings"
+              aria-label="Search the findings"
+            />
+            <InputGroupAddon>
+              <SearchIcon aria-hidden="true" />
+            </InputGroupAddon>
+          </InputGroup>
+          <Button type="submit" size="sm" aria-label="Search">
+            Search
+          </Button>
+        </form>
+      </div>
+      <FindingCaseList
+        query={{
+          task: taskId,
+          severity: severity === "all" ? undefined : severity,
+          query: query || undefined,
+          sort: sortPreference.field,
+          timeDirection: sortPreference.direction,
+        }}
+        contextTask={taskId}
+      />
+      {[
+        ...new Set(
+          taskFindings
+            .filter((f) => f.inherited)
+            .map((f) => f.source_task_id)
+            .filter((id): id is string => !!id),
+        ),
+      ].map((source) => (
+        <div key={source}>
+          <p className="mb-2 text-sm text-muted-foreground">Inherited from task #{source} · read-only</p>
+          <FindingCaseList
+            query={{
+              task: source,
+              severity: severity === "all" ? undefined : severity,
+              query: query || undefined,
+              sort: sortPreference.field,
+              timeDirection: sortPreference.direction,
+            }}
+            contextTask={taskId}
+            readOnly
+          />
         </div>
-        {items.map((f) => (
-          <Row key={f.id} f={f} contextTaskId={taskId} onStatus={onStatus} />
-        ))}
-        {items.length === 0 && (
-          <p className="px-4 py-8 text-center text-sm text-muted-foreground">No confirmed findings yet for this task or its directly linked tasks.</p>
-        )}
-      </CardContent>
-    </Card>
+      ))}
+      <details>
+        <summary className="cursor-pointer text-sm text-muted-foreground">Show the original reports</summary>
+        <Card className="overflow-hidden py-0">
+          <CardContent className="px-0">
+            <div className="flex items-center border-b px-4 py-2 text-xs text-muted-foreground">
+              <span className="min-w-0 flex-1">
+                Findings ({sortPreference.field === "severity" ? "by severity" : "by time"})
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span>
+                  {sortPreference.field === "severity" ? "Discovery time within a severity" : "Discovery time"}
+                </span>
+                {sortPreference.direction === "asc" ? (
+                  <ArrowUpIcon className="size-3.5" />
+                ) : (
+                  <ArrowDownIcon className="size-3.5" />
+                )}
+              </span>
+            </div>
+            {items.map((f) => (
+              <Row key={f.id} f={f} contextTaskId={taskId} onStatus={onStatus} />
+            ))}
+            {items.length === 0 && (
+              <p className="px-4 py-8 text-center text-sm text-muted-foreground">
+                {severity !== "all" || query
+                  ? "No original reports match the current filters."
+                  : "No confirmed findings yet for this task or its directly linked tasks."}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      </details>
+    </div>
   );
 }

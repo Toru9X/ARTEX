@@ -9,12 +9,15 @@ import {
   ChevronRightIcon,
   FileTextIcon,
   FlaskConicalIcon,
+  FolderIcon,
+  FolderOpenIcon,
   RotateCcwIcon,
   ShieldAlertIcon,
   Trash2Icon,
 } from "lucide-react";
 
 import { CopyButton } from "@/components/copy-button";
+import { FindingCaseMembers, FindingSeverityCounts } from "@/components/finding-case-list";
 import { Markdown } from "@/components/markdown";
 import { StatusBadge } from "@/components/status-badge";
 import {
@@ -37,7 +40,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { statusMeta } from "@/lib/status";
-import type { ActiveFindingRetest, Finding, FindingStatus, Severity } from "@/lib/types";
+import type {
+  ActiveFindingRetest,
+  Finding,
+  FindingAsset,
+  FindingCaseListRow,
+  FindingStatus,
+  Severity,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
@@ -56,7 +66,7 @@ export const FINDING_STATUSES: FindingStatus[] = [
 
 export const UNASSIGNED_TASK = "__unassigned__";
 
-// Inline edit buffer: the expanded row's name/category/severity.
+// Inline edit buffer: the expanded row's name / class / severity.
 export interface FindingEdit {
   name: string;
   vulnclass: string;
@@ -64,6 +74,13 @@ export interface FindingEdit {
 }
 
 export type FindingReport = { status: "loading" | "done" | "error"; text: string };
+
+function isStructuredReproductionReport(report: string) {
+  return (
+    /^##\s+(?:Reproduction steps|Reproduction|Testing process)\s*$/im.test(report) &&
+    /^\s*(?:###\s*)?Step\s*\d+[.:)]/im.test(report)
+  );
+}
 
 // Exploration node ids are only unique inside a task. Prefer the persisted
 // finding id and otherwise namespace the node id by task so editing one group
@@ -90,10 +107,14 @@ const COLUMN_COUNT = 9;
 
 interface FindingsTableProps {
   items: Finding[];
+  caseRows?: FindingCaseListRow[];
+  hideHeader?: boolean;
+  matchedIds?: number[];
+  presentation?: "records" | "task" | "asset";
   selectedIds: Set<string>;
   onToggleSelected: (id: string, checked: boolean) => void;
   onToggleSelectedPage: (ids: string[], checked: boolean) => void;
-  /** The expanded row's findingRowKey; null = all collapsed. */
+  /** The expanded row's findingRowKey; null = everything collapsed. */
   expandedKey: string | null;
   onToggleRow: (finding: Finding) => void;
   reports: Record<string, FindingReport>;
@@ -106,14 +127,19 @@ interface FindingsTableProps {
   activeRetests: Record<string, ActiveFindingRetest>;
   onDeepen: (finding: Finding) => void;
   onDelete: (finding: Finding) => void;
-  /** The select-all checkbox's accessibility label; the flat and grouped views word it differently. */
+  /** Accessible label for the select-all box; flat and grouped views word it differently. */
   selectAllLabel?: string;
 }
 
-// FindingsTable is the findings list's table body; the flat view and the grouped-by-task view share the same row rendering
-// (selection / inline expand / rename & status change / retest / deepen / delete), differing only in the outer container and pagination.
+// FindingsTable is the body of the findings list. The flat view and the by-task grouped view
+// share one row renderer (select / expand / inline rename and status / retest / deepen / delete);
+// only the outer container and the pager differ.
 export function FindingsTable({
   items,
+  caseRows,
+  hideHeader = false,
+  matchedIds,
+  presentation = "records",
   selectedIds,
   onToggleSelected,
   onToggleSelectedPage,
@@ -129,7 +155,7 @@ export function FindingsTable({
   activeRetests,
   onDeepen,
   onDelete,
-  selectAllLabel = "Select all on this page",
+  selectAllLabel = "Select everything on this page",
 }: FindingsTableProps) {
   const selectableIds = items.map((finding) => finding.finding_id).filter((id): id is string => Boolean(id));
   const selectedCount = selectableIds.filter((id) => selectedIds.has(id)).length;
@@ -140,37 +166,79 @@ export function FindingsTable({
     headerChecked = "indeterminate";
   }
 
+  const rows: FindingCaseListRow[] = caseRows ?? items.map((finding) => ({ finding, matched_ids: [] }));
+
+  const shared: Omit<FindingsTableProps, "items" | "caseRows"> = {
+    presentation,
+    selectedIds,
+    onToggleSelected,
+    onToggleSelectedPage,
+    expandedKey,
+    onToggleRow,
+    reports,
+    edit,
+    onEditChange,
+    saving,
+    onSave,
+    onStatusChange,
+    onRetest,
+    activeRetests,
+    onDeepen,
+    onDelete,
+  };
+
   return (
-    /* Fixed column widths keep expanded content from stretching the table; narrow screens scroll horizontally inside the table only. */
+    /* Fixed column widths keep the expanded content from stretching the table; narrow screens scroll inside the table only. */
     <Table className="min-w-[60rem] table-fixed">
-      <TableHeader>
-        <TableRow>
-          <TableHead className="w-8">
-            <Checkbox
-              checked={headerChecked}
-              onCheckedChange={(checked) => onToggleSelectedPage(selectableIds, checked === true)}
-              aria-label={selectAllLabel}
-            />
-          </TableHead>
-          <TableHead className="w-8" />
-          <TableHead className="w-20">Severity</TableHead>
-          <TableHead>Vulnerability</TableHead>
-          <TableHead className="w-44">Asset</TableHead>
-          <TableHead className="w-28">Status</TableHead>
-          <TableHead className="w-32">Task</TableHead>
-          <TableHead className="w-24">Time</TableHead>
-          <TableHead className="w-48">Actions</TableHead>
-        </TableRow>
-      </TableHeader>
+      {hideHeader ? (
+        <colgroup>
+          <col className="w-8" />
+          <col className="w-8" />
+          <col className="w-20" />
+          <col />
+          <col className="w-44" />
+          <col className="w-28" />
+          <col className="w-32" />
+          <col className="w-24" />
+          <col className="w-48" />
+        </colgroup>
+      ) : null}
+      {!hideHeader ? (
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-8">
+              <Checkbox
+                checked={headerChecked}
+                onCheckedChange={(checked) => onToggleSelectedPage(selectableIds, checked === true)}
+                aria-label={selectAllLabel}
+              />
+            </TableHead>
+            <TableHead className="w-8" />
+            <TableHead className="w-20">Severity</TableHead>
+            <TableHead>Name</TableHead>
+            <TableHead className="w-44">Assets</TableHead>
+            <TableHead className="w-28">Status</TableHead>
+            <TableHead className="w-32">Task</TableHead>
+            <TableHead className="w-24">Time</TableHead>
+            <TableHead className="w-48">Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+      ) : null}
       <TableBody>
-        {items.map((f) => {
+        {rows.map((row) => {
+          if (row.case) return <FindingFolderTableRows key={`case:${row.case.id}`} row={row} shared={shared} />;
+          const f = row.finding;
+          if (!f) return null;
           const rowKey = findingRowKey(f);
           const open = expandedKey === rowKey;
           const retest = f.finding_id ? activeRetests[f.finding_id] : undefined;
           return (
             <React.Fragment key={rowKey}>
               <TableRow
-                className="cursor-pointer"
+                className={cn(
+                  "cursor-pointer",
+                  matchedIds && !matchedIds.includes(Number(f.finding_id)) && "bg-muted/30",
+                )}
                 role="button"
                 tabIndex={0}
                 aria-expanded={open}
@@ -186,7 +254,7 @@ export function FindingsTable({
                     <Checkbox
                       checked={selectedIds.has(f.finding_id)}
                       onCheckedChange={(c) => onToggleSelected(f.finding_id as string, c === true)}
-                      aria-label="Select this vulnerability"
+                      aria-label="Select this finding"
                     />
                   )}
                 </TableCell>
@@ -213,28 +281,16 @@ export function FindingsTable({
                       <span className="truncate font-medium">{f.name || f.vulnclass || "Uncategorized"}</span>
                     )}
                     <span className="truncate text-xs text-muted-foreground">{f.summary}</span>
-                    <Badge variant="outline">Traffic evidence: {f.traffic_count ?? 0}</Badge>
+                    {matchedIds && !matchedIds.includes(Number(f.finding_id)) ? (
+                      <Badge variant="outline" className="w-fit">
+                        outside the current filter
+                      </Badge>
+                    ) : null}
+                    <Badge variant="outline">Traffic evidence {f.traffic_count ?? 0}</Badge>
                   </div>
                 </TableCell>
                 <TableCell>
-                  {f.assets && f.assets.length > 0 ? (
-                    <div className="flex flex-wrap gap-1">
-                      {f.assets.slice(0, 3).map((a) => (
-                        <code
-                          key={a.id}
-                          className="max-w-full truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
-                          title={`${a.type} · ${a.label}`}
-                        >
-                          {a.label}
-                        </code>
-                      ))}
-                      {f.assets.length > 3 && (
-                        <span className="text-xs text-muted-foreground">+{f.assets.length - 3}</span>
-                      )}
-                    </div>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )}
+                  <FindingAssetLabels assets={f.assets} />
                 </TableCell>
                 <TableCell onClick={(e) => e.stopPropagation()}>
                   {f.finding_id ? (
@@ -274,14 +330,19 @@ export function FindingsTable({
                   <div className="flex items-center gap-1">
                     {retest ? (
                       <Button asChild size="sm" variant="ghost">
-                        <Link href={`/chat?c=${retest.conversation_id}`} title="View the retest in progress">
+                        <Link href={`/chat?c=${retest.conversation_id}`} title="Open the running retest session">
                           <Spinner data-icon="inline-start" />
                           Retesting
                         </Link>
                       </Button>
                     ) : null}
                     {!retest && f.finding_id && !f.inherited ? (
-                      <Button size="sm" variant="ghost" onClick={() => onRetest(f)} title="Retest this vulnerability in a separate conversation">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => onRetest(f)}
+                        title="Retest this finding in its own session"
+                      >
                         <RotateCcwIcon data-icon="inline-start" />
                         Retest
                       </Button>
@@ -299,20 +360,21 @@ export function FindingsTable({
                             size="icon"
                             variant="ghost"
                             className="size-7 text-muted-foreground hover:text-destructive"
-                            aria-label="Delete vulnerability"
+                            aria-label="Delete the finding"
                           >
                             <Trash2Icon className="size-4" />
                           </Button>
                         </AlertDialogTrigger>
                         <AlertDialogContent>
                           <AlertDialogHeader>
-                            <AlertDialogTitle>Delete this vulnerability?</AlertDialogTitle>
+                            <AlertDialogTitle>Delete this finding?</AlertDialogTitle>
                             <AlertDialogDescription className="break-words">
                               "
                               <span className="break-all">
                                 {f.name || f.vulnclass || f.summary || `#${f.finding_id}`}
                               </span>
-                              " will be permanently deleted and removed from the findings list, the task findings tab, and the exploration graph. This action cannot be undone.
+                              " will be deleted permanently and removed from the findings list, the task's findings tab
+                              and the exploration graph. This cannot be undone.
                             </AlertDialogDescription>
                           </AlertDialogHeader>
                           <AlertDialogFooter>
@@ -327,23 +389,23 @@ export function FindingsTable({
               </TableRow>
               {open && (
                 <TableRow className="hover:bg-transparent">
-                  {/* whitespace-normal overrides TableCell's default nowrap, otherwise the expanded area's text
-                      is forced onto one line and overflows the cell. */}
+                  {/* whitespace-normal overrides TableCell's default nowrap; without it the
+                      expanded text is forced onto one line and overflows the cell. */}
                   <TableCell colSpan={COLUMN_COUNT} className="bg-muted/30 whitespace-normal">
                     <div className="flex flex-col gap-2 px-2 py-1">
-                      {/* Inline edit: name/category/severity, editable and savable (standalone finding rows only). */}
+                      {/* Inline edit: name / class / severity, saved in place (standalone finding rows only). */}
                       {f.finding_id && edit && (
                         <div className="flex flex-wrap items-end gap-3 rounded-md border bg-background px-3 py-2.5">
                           <div className="flex min-w-[12rem] flex-1 flex-col gap-1">
-                            <Label className="text-xs text-muted-foreground">Vulnerability</Label>
+                            <Label className="text-xs text-muted-foreground">Name</Label>
                             <Input
                               value={edit.name}
                               onChange={(e) => onEditChange((s) => (s ? { ...s, name: e.target.value } : s))}
-                              placeholder="Readable title; falls back to category when empty"
+                              placeholder="Readable title; empty falls back to the class"
                             />
                           </div>
                           <div className="flex min-w-[10rem] flex-col gap-1">
-                            <Label className="text-xs text-muted-foreground">Category</Label>
+                            <Label className="text-xs text-muted-foreground">Class</Label>
                             <Input
                               value={edit.vulnclass}
                               onChange={(e) => onEditChange((s) => (s ? { ...s, vulnclass: e.target.value } : s))}
@@ -378,14 +440,13 @@ export function FindingsTable({
                         Evidence
                         {f.vulnclass && (
                           <span>
-                            · Type:
-                            <code className="rounded bg-muted px-1.5 py-0.5 font-mono">{f.vulnclass}</code>
+                            · class: <code className="rounded bg-muted px-1.5 py-0.5 font-mono">{f.vulnclass}</code>
                           </span>
                         )}
                         {f.param_id && <code className="rounded bg-muted px-1.5 py-0.5 font-mono">{f.param_id}</code>}
                         {f.assets && f.assets.length > 0 && (
                           <span className="flex flex-wrap items-center gap-1">
-                            · Assets:
+                            · assets:{" "}
                             {f.assets.map((a) => (
                               <code key={a.id} className="rounded bg-muted px-1.5 py-0.5 font-mono" title={a.type}>
                                 {a.label}
@@ -398,8 +459,8 @@ export function FindingsTable({
                         {f.evidence}
                       </pre>
 
-                      {/* Detailed report (Markdown): lazily loaded by finding_id on expand, viewable without entering the detail page. */}
-                      {f.finding_id && (
+                      {/* The legacy detailed report stays here; the newer consolidated report is shown on the detail page as overview / steps / root cause / remediation. */}
+                      {f.finding_id && !isStructuredReproductionReport(reports[rowKey]?.text ?? "") && (
                         <div className="flex flex-col gap-1.5">
                           <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
                             <span className="flex items-center gap-2">
@@ -420,13 +481,13 @@ export function FindingsTable({
                             if (!rep || rep.status === "loading")
                               return <p className="text-xs text-muted-foreground">Loading…</p>;
                             if (rep.status === "error")
-                              return <p className="text-xs text-muted-foreground">Failed to load the report.</p>;
+                              return <p className="text-xs text-muted-foreground">Could not load the report.</p>;
                             if (!rep.text.trim())
                               return <p className="text-xs text-muted-foreground">No detailed report yet.</p>;
                             return (
-                              // break-words inherits into paragraphs/lists; pre additionally gets
-                              // whitespace-pre-wrap so code blocks wrap too — otherwise long code lines/URLs
-                              // would stretch the colSpan cell and push the whole table into horizontal scrolling.
+                              // break-words is inherited by paragraphs and lists; pre also gets
+                              // whitespace-pre-wrap so code blocks wrap too -- otherwise a long
+                              // code line or URL widens the colSpan cell and scrolls the table.
                               <div className="min-w-0 break-words rounded-md border bg-background px-3 py-2 [&_pre]:whitespace-pre-wrap">
                                 <Markdown text={rep.text} />
                               </div>
@@ -441,7 +502,7 @@ export function FindingsTable({
             </React.Fragment>
           );
         })}
-        {items.length === 0 && (
+        {(caseRows ? caseRows.length : items.length) === 0 && (
           <TableRow>
             <TableCell colSpan={COLUMN_COUNT} className="py-12 text-center text-sm text-muted-foreground">
               No matching findings.
@@ -450,5 +511,141 @@ export function FindingsTable({
         )}
       </TableBody>
     </Table>
+  );
+}
+
+// Ordinary reports and merged folders share one asset presentation, including
+// truncation and overflow counts, so labels align in every table view.
+function FindingAssetLabels({
+  assets = [],
+  totalCount = assets.length,
+}: {
+  assets?: FindingAsset[];
+  totalCount?: number;
+}) {
+  if (assets.length === 0) return <span className="text-muted-foreground">—</span>;
+  const visibleAssets = assets.slice(0, 3);
+  const remaining = Math.max(totalCount, assets.length) - visibleAssets.length;
+  return (
+    <div className="flex min-w-0 flex-wrap gap-1">
+      {visibleAssets.map((asset) => (
+        <code
+          key={asset.id}
+          className="max-w-full truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
+          title={`${asset.type} · ${asset.label}`}
+        >
+          {asset.label}
+        </code>
+      ))}
+      {remaining > 0 ? <span className="text-xs text-muted-foreground">+{remaining}</span> : null}
+    </div>
+  );
+}
+
+// Folder summaries occupy the same columns as the current view's ordinary rows.
+// Expanded members reuse those rows without a second heading or column header.
+function FindingFolderTableRows({
+  row,
+  shared,
+}: {
+  row: FindingCaseListRow;
+  shared: Omit<FindingsTableProps, "items" | "caseRows">;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const group = row.case;
+  if (!group) return null;
+  // Match the current table's ordinary rows, which display the task description.
+  const taskLabel = row.task_description;
+  const assets = row.assets ?? [];
+  const assetCount = row.asset_count ?? assets.length;
+  return (
+    <>
+      <TableRow className={cn(open && "bg-muted/60")}>
+        <TableCell />
+        <TableCell>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            aria-controls={`finding-table-members-${group.id}`}
+            aria-label={`${open ? "Collapse" : "Expand"} ${group.title}`}
+          >
+            <ChevronRightIcon className={cn("size-4 transition-transform", open && "rotate-90")} />
+          </Button>
+        </TableCell>
+        <TableCell>
+          <FindingSeverityCounts counts={group} />
+        </TableCell>
+        <TableCell>
+          <div className="flex min-w-0 items-start gap-2">
+            {open ? (
+              <FolderOpenIcon className="mt-0.5 size-4 shrink-0 text-primary" />
+            ) : (
+              <FolderIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+            )}
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <Link
+                className="truncate font-medium hover:text-primary hover:underline"
+                title={group.title}
+                href={`/function/findings/case?id=${group.id}`}
+              >
+                {group.title}
+              </Link>
+              <span className="truncate text-muted-foreground text-xs">
+                {group.count} reports ·{" "}
+                {group.report_version !== group.version ? "unified report pending" : "unified report written"}
+              </span>
+            </div>
+          </div>
+        </TableCell>
+        <TableCell>
+          <FindingAssetLabels assets={assets} totalCount={assetCount} />
+        </TableCell>
+        <TableCell>
+          <span className="text-muted-foreground" title="See each member's own triage status">
+            —
+          </span>
+        </TableCell>
+        <TableCell>
+          {group.task_id ? (
+            <Link
+              className="inline-flex max-w-full items-center gap-1 text-primary hover:underline"
+              title={taskLabel}
+              href={`/function/tasks/detail?id=${group.task_id}`}
+            >
+              <span className="truncate">{taskLabel}</span>
+              <ArrowUpRightIcon className="size-3 shrink-0" />
+            </Link>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </TableCell>
+        <TableCell className="text-muted-foreground text-xs tabular-nums">
+          {row.last_found_at ? fmtTime(row.last_found_at) : "—"}
+        </TableCell>
+        <TableCell>
+          <Button asChild size="sm" variant="ghost">
+            <Link href={`/function/findings/case?id=${group.id}`}>Unified report</Link>
+          </Button>
+        </TableCell>
+      </TableRow>
+      {open ? (
+        <TableRow>
+          <TableCell colSpan={COLUMN_COUNT} className="whitespace-normal bg-muted/20 px-4 py-4">
+            <section id={`finding-table-members-${group.id}`} aria-label={`original reports in ${group.title}`}>
+              <FindingCaseMembers
+                caseId={group.id}
+                version={group.version}
+                nested
+                renderRecords={(members) => (
+                  <FindingsTable {...shared} items={members} matchedIds={row.matched_ids} hideHeader />
+                )}
+              />
+            </section>
+          </TableCell>
+        </TableRow>
+      ) : null}
+    </>
   );
 }

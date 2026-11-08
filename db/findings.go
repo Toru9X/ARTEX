@@ -15,6 +15,15 @@ import (
 // DBFinding is a row in the standalone findings table. It persists across task
 // deletion unless the caller explicitly requests related finding cleanup.
 type DBFinding struct {
+	// ReportConversationID is the conversation that wrote this finding's report,
+	// backfilled on read for reports generated before the column existed.
+	ReportConversationID *int64 `json:"report_conversation_id,omitempty"`
+
+	// The two fields below are set only while building a unified case export;
+	// they never correspond to a stored finding and are not persisted.
+	ExportCaseID    int64
+	ExportMemberIDs []int64
+
 	TrafficCount          int
 	EvidenceVersion       int64
 	ReportEvidenceVersion int64
@@ -150,12 +159,15 @@ func (d *DB) ListFindings(limit int) ([]*DBFinding, error) {
 // filter on that column". Sort is "severity" (severity desc, then newest) or
 // anything else (newest first).
 type FindingFilter struct {
-	Severity  string // high | medium | low
-	Status    string // pending | false_positive | ignored | resolved
-	VulnClass string
-	TaskID    string // task id (in string form; empty/invalid = do not filter by task)
-	Query     string // fuzzy search keyword over name/class/summary/evidence/report body
-	Sort      string // "severity" | "time"
+	Severity      string // high | medium | low
+	Status        string // pending | false_positive | ignored | resolved
+	VulnClass     string
+	TaskID        string // task id (in string form; empty/invalid = do not filter by task)
+	Query         string // fuzzy search keyword over name/class/summary/evidence/report body
+	Sort          string // "severity" | "time"
+	TimeDirection string // "asc" | "desc"; applies to time, not the severity ranking
+	From          string // RFC3339 timestamp, inclusive
+	To            string // RFC3339 timestamp, inclusive
 	// AssetScope is a node key of the asset tree (a:<id> / c:<id> / r:<domain> /
 	// __none__); selecting a node means selecting its whole subtree.
 	// Empty = do not filter by asset.
@@ -166,6 +178,14 @@ type FindingFilter struct {
 	assetIDs  []int64 // all asset ids in the subtree
 	assetNone bool    // only findings with "unlinked assets"
 	assetMiss bool    // the selected node does not exist under the current filter → result is always empty
+}
+
+// timeOrder only returns SQL keywords from a fixed allowlist.
+func (f FindingFilter) timeOrder() string {
+	if f.TimeDirection == "asc" {
+		return "ASC"
+	}
+	return "DESC"
 }
 
 // FindingUnassignedTask is the task filter sentinel for findings whose task is
@@ -189,6 +209,20 @@ func (f FindingFilter) where() (string, []any) {
 	add("severity", f.Severity)
 	add("status", f.Status)
 	add("vulnclass", f.VulnClass)
+	// An unparsable bound is ignored rather than rejected: the filter is a
+	// convenience, and a bad value must not empty an otherwise valid page.
+	if from := strings.TrimSpace(f.From); from != "" {
+		if parsed, err := time.Parse(time.RFC3339, from); err == nil {
+			args = append(args, parsed)
+			conds = append(conds, fmt.Sprintf("f.created_at >= $%d", len(args)))
+		}
+	}
+	if to := strings.TrimSpace(f.To); to != "" {
+		if parsed, err := time.Parse(time.RFC3339, to); err == nil {
+			args = append(args, parsed)
+			conds = append(conds, fmt.Sprintf("f.created_at <= $%d", len(args)))
+		}
+	}
 	// task_id is a bigint column, compared as an integer (it cannot go through
 	// the text add above); empty/invalid values are ignored.
 	if f.TaskID == FindingUnassignedTask {
@@ -262,10 +296,10 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 		return []*DBFinding{}, total, nil
 	}
 
-	order := "f.created_at DESC, f.id DESC"
+	order := "f.created_at " + f.timeOrder() + ", f.id DESC"
 	if f.Sort == "severity" {
-		// critical > high > medium > low > others, then newest first.
-		order = `CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, f.created_at DESC, f.id DESC`
+		// critical > high > medium > low > others, then the requested time direction.
+		order = `CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, ` + order
 	}
 	pageArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
 	q := fmt.Sprintf(`
@@ -327,9 +361,9 @@ func (d *DB) ListFindingGroups(f FindingFilter, page, pageSize int) ([]FindingGr
 		return []FindingGroup{}, groupTotal, findingTotal, nil
 	}
 
-	order := "MAX(f.created_at) DESC, t.id DESC NULLS LAST"
+	order := "MAX(f.created_at) " + f.timeOrder() + ", t.id DESC NULLS LAST"
 	if f.Sort == "severity" {
-		order = `MAX(CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) DESC, MAX(f.created_at) DESC, t.id DESC NULLS LAST`
+		order = `MAX(CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) DESC, ` + order
 	}
 	pageArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
 	query := fmt.Sprintf(`SELECT t.id, COALESCE(t.name,''), COALESCE(t.description,''), COALESCE(
@@ -643,13 +677,14 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	f := &DBFinding{}
 	var aidsJSON string
-	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, '')
+	var reportConv sql.NullInt64
+	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, ''), f.report_conversation_id
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
 		WHERE f.id = $1`, id).Scan(
 		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report)
+		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report, &reportConv)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -657,7 +692,53 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+	if reportConv.Valid {
+		f.ReportConversationID = &reportConv.Int64
+	}
+	// A report written before the column existed still has its session; find it
+	// once and persist the link so the lookup does not repeat.
+	if f.ReportConversationID == nil && strings.TrimSpace(f.Report) != "" {
+		if resolved, resolveErr := d.ResolveFindingReportConversation(f.ID); resolveErr == nil {
+			f.ReportConversationID = resolved
+		}
+	}
 	return f, nil
+}
+
+// SetFindingReportConversationID records which conversation wrote this
+// finding's report, so regenerating it reuses that session.
+func (d *DB) SetFindingReportConversationID(findingID, conversationID int64) error {
+	_, err := d.Exec(`UPDATE findings SET report_conversation_id=$2 WHERE id=$1`, findingID, conversationID)
+	return err
+}
+
+// ResolveFindingReportConversation backfills links for reports generated before
+// report_conversation_id was persisted. It matches on the conversation title and
+// on activity details, preferring a session that actually wrote the report.
+func (d *DB) ResolveFindingReportConversation(findingID int64) (*int64, error) {
+	var id int64
+	err := d.QueryRow(`SELECT c.id FROM conversations c
+	JOIN conversation_activities a ON a.conversation_id=c.id
+	WHERE c.agent_key='reporter' AND (
+	 c.title ILIKE '%finding#' || $1::text || '%' OR
+	 a.detail ILIKE '%finding_id=' || $1::text || '%' OR
+	 a.detail ILIKE '%"finding_id":' || $1::text || '%'
+	)
+	ORDER BY CASE WHEN EXISTS (
+		SELECT 1 FROM conversation_activities r
+		WHERE r.conversation_id=c.id AND (r.tool='update_finding_report' OR r.summary ILIKE 'finding % report updated%')
+	) THEN 0 ELSE 1 END,
+	c.created_at ASC, c.id ASC LIMIT 1`, findingID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := d.SetFindingReportConversationID(findingID, id); err != nil {
+		return nil, err
+	}
+	return &id, nil
 }
 
 // DeleteFinding removes a finding entirely: the standalone findings row and its

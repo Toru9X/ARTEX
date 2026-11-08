@@ -314,6 +314,11 @@ func coverageAssetRefDTO(ref db.AssetRef) CoverageAssetRefDTO {
 // ---- Finding (frontend "Finding") ----
 
 type FindingDTO struct {
+	// Set only on a unified case export: the row stands for a whole case, so it
+	// carries the case id and its members instead of a single finding handle.
+	CaseID    string  `json:"case_id,omitempty"`
+	MemberIDs []int64 `json:"member_ids,omitempty"`
+
 	TrafficCount          int                        `json:"traffic_count"`
 	EvidenceVersion       int64                      `json:"evidence_version"`
 	ReportEvidenceVersion int64                      `json:"report_evidence_version"`
@@ -329,6 +334,8 @@ type FindingDTO struct {
 	Summary   string `json:"summary"`
 	Evidence  string `json:"evidence"`
 	Report    string `json:"report,omitempty"` // detailed report (Markdown); returned only by the detail endpoint, empty in lists
+	// The conversation that wrote the report, so the UI can open that session.
+	ReportConversationID *int64 `json:"report_conversation_id,omitempty"`
 
 	IntentID        string            `json:"intent_id,omitempty"`
 	ParamID         string            `json:"param_id,omitempty"`
@@ -459,14 +466,21 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		FindingID:    i64s(f.ID),
 		TrafficCount: f.TrafficCount, EvidenceVersion: f.EvidenceVersion, ReportEvidenceVersion: f.ReportEvidenceVersion,
 		ReportStale: f.Report != "" && f.EvidenceVersion != f.ReportEvidenceVersion, TrafficBindings: f.TrafficBindings,
-		VulnClass: f.VulnClass,
-		Name:      f.Name,
-		Severity:  f.Severity,
-		Status:    status,
-		Summary:   f.Summary,
-		Evidence:  f.Evidence,
-		Report:    f.Report,
-		TS:        rfc3339(f.CreatedAt),
+		VulnClass:            f.VulnClass,
+		Name:                 f.Name,
+		Severity:             f.Severity,
+		Status:               status,
+		Summary:              f.Summary,
+		Evidence:             f.Evidence,
+		Report:               f.Report,
+		ReportConversationID: f.ReportConversationID,
+		TS:                   rfc3339(f.CreatedAt),
+	}
+	if f.ExportCaseID > 0 {
+		d.ID = "case:" + i64s(f.ExportCaseID)
+		d.FindingID = ""
+		d.CaseID = i64s(f.ExportCaseID)
+		d.MemberIDs = f.ExportMemberIDs
 	}
 	d.Assets = findingAssetDTOs(f.AssetIDs, assets)
 	if f.TaskID != nil {

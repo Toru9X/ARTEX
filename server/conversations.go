@@ -608,13 +608,23 @@ func (s *Server) readTriggerBehavior(agentKey string) triggerBehavior {
 // merging by task / all / none); parallel → run each fire in its own concurrent
 // conversation up to trigger_max_parallel. Distinct agents always run concurrently.
 func (s *Server) StartTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string) {
+	s.startTriggeredRun(agentKey, title, message, taskID, mergeable, taskDesc, taskGoal, 0)
+}
+
+// StartTriggeredRunWithConversation runs the fire inside a conversation the
+// caller already created, so it can report on that session while it runs.
+func (s *Server) StartTriggeredRunWithConversation(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string, conversationID int64) {
+	s.startTriggeredRun(agentKey, title, message, taskID, mergeable, taskDesc, taskGoal, conversationID)
+}
+
+func (s *Server) startTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string, conversationID int64) {
 	if s.m.pg == nil || s.chatAgentRef() == nil {
 		return
 	}
 	cfg := s.readTriggerBehavior(agentKey) // DB read BEFORE the lock (never under queueMu)
 	s.queueMu.Lock()
 	s.triggerCfg[agentKey] = cfg
-	s.triggerQ[agentKey] = append(s.triggerQ[agentKey], triggeredRun{agentKey: agentKey, title: title, message: message, taskID: taskID, taskDesc: taskDesc, taskGoal: taskGoal, mergeable: mergeable})
+	s.triggerQ[agentKey] = append(s.triggerQ[agentKey], triggeredRun{conversationID: conversationID, agentKey: agentKey, title: title, message: message, taskID: taskID, taskDesc: taskDesc, taskGoal: taskGoal, mergeable: mergeable})
 	s.pumpLocked(agentKey)
 	s.queueMu.Unlock()
 }
@@ -668,7 +678,9 @@ func (s *Server) runAndPump(agentKey string, item triggeredRun) {
 // Caller holds queueMu.
 func (s *Server) nextTriggerRun(agentKey string, cfg triggerBehavior) triggeredRun {
 	q := s.triggerQ[agentKey]
-	if cfg.runMode == "parallel" || cfg.mergeMode == "none" {
+	// A run bound to a caller-created conversation is handed back as-is: merging
+	// it would move its output into some other session.
+	if q[0].conversationID > 0 || cfg.runMode == "parallel" || cfg.mergeMode == "none" {
 		s.triggerQ[agentKey] = q[1:]
 		return q[0]
 	}
@@ -798,12 +810,25 @@ func mergeAllRuns(items []triggeredRun) triggeredRun {
 func (s *Server) runTriggeredRun(item triggeredRun) {
 	defer func() {
 		if r := recover(); r != nil {
+			if item.conversationID > 0 {
+				_, _ = s.m.pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error=$2 WHERE conversation_id=$1`, item.conversationID, fmt.Sprint(r))
+			}
 			log.Printf("[trigger] run for %s panicked: %v", item.agentKey, r)
 		}
 	}()
 	pg := s.m.pg
-	c, err := pg.CreateConversation(item.agentKey, firstLine(item.title, 60), nil)
-	if err != nil {
+	var c *db.Conversation
+	var err error
+	if item.conversationID > 0 {
+		c, err = pg.GetConversation(item.conversationID)
+		_, _ = pg.Exec(`UPDATE finding_case_review_runs SET state='running' WHERE conversation_id=$1`, item.conversationID)
+	} else {
+		c, err = pg.CreateConversation(item.agentKey, firstLine(item.title, 60), nil)
+	}
+	if err != nil || c == nil {
+		if item.conversationID > 0 {
+			_, _ = pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error='the review conversation is unavailable' WHERE conversation_id=$1`, item.conversationID)
+		}
 		log.Printf("[trigger] create conversation for %s failed: %v", item.agentKey, err)
 		return
 	}

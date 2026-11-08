@@ -109,6 +109,14 @@ const delivery: Record<string, StatusMeta> = {
   skipped: { label: "Skipped", tone: "neutral" },
 };
 
+export const SEVERITY_FILTER_OPTIONS = [
+  ["all", "All"],
+  ["critical", severity.critical.label],
+  ["high", severity.high.label],
+  ["medium", severity.medium.label],
+  ["low", severity.low.label],
+] as const;
+
 // Intelligence category colors are shared by task, asset and detail views.
 const intelligence: Record<string, StatusMeta> = {
   credential: { label: "Credential", tone: "violet" },

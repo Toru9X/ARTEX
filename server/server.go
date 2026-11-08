@@ -164,6 +164,11 @@ type provEntry struct {
 // taskID + mergeable let the drainer coalesce several event triggers (finding/goal)
 // from the SAME task into one conversation before it starts (interval fires don't merge).
 type triggeredRun struct {
+	// conversationID names a conversation the caller already created (a manual
+	// finding review). Such a run is never merged with another, so the caller
+	// keeps a stable handle on the session it is waiting for.
+	conversationID int64
+
 	agentKey  string
 	title     string
 	message   string // event body (trigger phrase + tool/args/results etc.); no task description/goal header
@@ -824,6 +829,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/companies/reattribute", s.reattribute)
 
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
+	mux.HandleFunc("GET /api/exploration/finding-cases", s.listFindingCases)
+	mux.HandleFunc("POST /api/exploration/finding-cases", s.mergeFindingCase)
+	mux.HandleFunc("GET /api/exploration/finding-cases/{id}", s.getFindingCase)
+	mux.HandleFunc("GET /api/exploration/finding-cases/{id}/members", s.getFindingCaseMembers)
+	mux.HandleFunc("DELETE /api/exploration/finding-cases/{id}/members/{fid}", s.removeFindingCaseMember)
+	mux.HandleFunc("PUT /api/exploration/finding-cases/{id}/report", s.updateCaseReport)
+	mux.HandleFunc("GET /api/exploration/finding-case-suggestions", s.caseSuggestions)
+	mux.HandleFunc("POST /api/exploration/finding-case-suggestions/{id}", s.resolveCaseSuggestion)
+	mux.HandleFunc("POST /api/exploration/finding-case-review", s.reviewFindingCases)
+	mux.HandleFunc("GET /api/exploration/finding-case-review", s.caseReviewRuns)
+	mux.HandleFunc("POST /api/exploration/findings/{id}/generate-report", s.generateFindingReport)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)
 	mux.HandleFunc("GET /api/exploration/findings/groups", s.findingGroups)
 	mux.HandleFunc("GET /api/exploration/findings/asset-tree", s.findingAssetTree)
@@ -2369,6 +2385,17 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Consolidated mode expands the selection to whole cases BEFORE staging, so
+	// the evidence store freezes every member's snapshots; the composites
+	// themselves are built afterwards from those frozen copies.
+	var casePlan *findingCaseExportPlan
+	if q.Get("mode") == "consolidated" {
+		fs, casePlan, err = s.prepareFindingCaseExport(fs)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	stage, err := os.MkdirTemp("", "artex-finding-export-")
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -2378,6 +2405,13 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	if err = s.evidenceStore().StageFindingsExport(r.Context(), fs, stage, format == "md-zip"); err != nil {
 		evidenceError(w, err)
 		return
+	}
+	if casePlan != nil {
+		fs, err = s.consolidateFindingCaseExport(fs, casePlan, q.Get("include_originals") == "true")
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
 	now := time.Now()
 	stamp := now.Format("20060102-150405")

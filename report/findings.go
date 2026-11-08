@@ -56,6 +56,10 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 	} {
 		fmt.Fprintf(&b, "| %s | %d |\n", s.label, counts[s.key])
 	}
+	// A case composite carries the case's own rating, which may still be unset.
+	if counts["unassessed"] > 0 {
+		fmt.Fprintf(&b, "| Unassessed | %d |\n", counts["unassessed"])
+	}
 	b.WriteString("\n")
 
 	if len(items) == 0 {
@@ -128,6 +132,10 @@ func FindingFilename(f *db.DBFinding) string {
 	sev := nz(f.Severity, "info")
 	title := findingTitle(f)
 	name := fmt.Sprintf("%s_%s_#%d", sev, title, f.ID)
+	// A case composite is named after the case, not after any one member.
+	if f.ExportCaseID > 0 {
+		name = fmt.Sprintf("case_%d_%s_%s", f.ExportCaseID, sev, title)
+	}
 	name = unsafeFilenameChars.ReplaceAllString(name, "_")
 	name = strings.Trim(name, "._")
 	if name == "" {
@@ -152,8 +160,12 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 	w := csv.NewWriter(&buf)
 	_ = w.Write([]string{"ID", "Name", "Class", "Severity", "Status", "Task", "Found At", "Summary", "Traffic Evidence Count", "Traffic Evidence IDs"})
 	for _, f := range items {
+		id := fmt.Sprintf("%d", f.ID)
+		if f.ExportCaseID > 0 {
+			id = fmt.Sprintf("case:%d", f.ExportCaseID)
+		}
 		_ = w.Write([]string{
-			fmt.Sprintf("%d", f.ID),
+			id,
 			findingTitle(f),
 			f.VulnClass,
 			nz(f.Severity, "info"),

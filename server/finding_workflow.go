@@ -116,6 +116,12 @@ func objectProperty(parent map[string]any, key string) map[string]any {
 }
 
 func (s *Server) agentFindingTrafficAccess(ctx context.Context, id int64, write bool) error {
+	if write {
+		// A historical consolidation run reads evidence but never changes it.
+		if err := s.checkCaseReviewScope(ctx, "bind_finding_traffic", findingCaseRequest{}); err != nil {
+			return err
+		}
+	}
 	if id <= 0 {
 		return errors.New("finding_id must be the standalone finding record ID, not an exploration node ID")
 	}

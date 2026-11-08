@@ -20,11 +20,14 @@ type DeferredInfo struct {
 	// intelligence recording is on; empty when it is off.
 	IntelligenceGuidance string
 
-	FindingGuidance string            // derived from the final permitted tools, including DB overrides
-	Deferred        []string          // all MCP tool names (schema withheld)
-	GlobalNames     []string          // MCP names to list in the system-prompt block
-	Unlock          *actool.UnlockSet // shared call-gate; nil when no MCP tools
-	UnlockSkill     func(skillName string)
+	FindingGuidance string // derived from the final permitted tools, including DB overrides
+	// CaseGuidance covers consolidating repeated reports of one defect; it is
+	// independent of the optional traffic binding.
+	CaseGuidance string
+	Deferred     []string          // all MCP tool names (schema withheld)
+	GlobalNames  []string          // MCP names to list in the system-prompt block
+	Unlock       *actool.UnlockSet // shared call-gate; nil when no MCP tools
+	UnlockSkill  func(skillName string)
 }
 
 // ToolAugment, if set, returns the EXTRA tools an agent should see beyond its
@@ -64,8 +67,18 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 	if ToolResolve != nil {
 		out = ToolResolve(ctx, agentKey, out)
 	}
+	if agentKey == "reporter" && isFindingCaseReview(ctx) {
+		out = historicalFindingCaseTools(out)
+	}
 	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
+	out, def.CaseGuidance = findingCaseWorkflow(agentKey, out)
 	out, def.IntelligenceGuidance = intelligenceWorkflow(ctx, out)
+	if agentKey == "reporter" && isFindingCaseReview(ctx) {
+		// A historical review writes nothing of its own, so the ordinary
+		// reporting guidance would only invite tools it no longer has.
+		def.FindingGuidance = ""
+		def.CaseGuidance += historicalFindingReviewGuidance
+	}
 	for i, t := range out {
 		out[i] = guardPanic(t)
 	}
