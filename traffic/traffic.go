@@ -1050,6 +1050,65 @@ func (t *Traffic) Hosts() ([]HostCount, error) {
 	return out, rows.Err()
 }
 
+// hostScopeClause turns a scope list into a host condition. A bare host matches
+// itself and any port on it; a "*.example.com" wildcard also matches every
+// subdomain. An empty result means the scope selects nothing, which the caller
+// must treat as "no hosts" rather than "all hosts".
+func hostScopeClause(hosts []string) (string, []any) {
+	conditions := make([]string, 0, len(hosts))
+	args := make([]any, 0, len(hosts)*2)
+	seen := make(map[string]struct{}, len(hosts))
+	for _, raw := range hosts {
+		host := strings.ToLower(strings.TrimSpace(raw))
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		if strings.HasPrefix(host, "*.") {
+			base := strings.TrimPrefix(host, "*.")
+			if base == "" {
+				continue
+			}
+			conditions = append(conditions, "(host=? OR host LIKE ? OR host LIKE ?)")
+			args = append(args, base, base+":%", "%."+base)
+			continue
+		}
+		conditions = append(conditions, "(host=? OR host LIKE ?)")
+		args = append(args, host, host+":%")
+	}
+	if len(conditions) == 0 {
+		return "", nil
+	}
+	return "(" + strings.Join(conditions, " OR ") + ")", args
+}
+
+// HostsForScope is Hosts restricted to a scope. An empty or unusable scope
+// returns no hosts, so a caller can never widen its reach by passing nothing.
+func (t *Traffic) HostsForScope(scope []string) ([]HostCount, error) {
+	cond, args := hostScopeClause(scope)
+	if cond == "" {
+		return []HostCount{}, nil
+	}
+	rows, err := t.db.Query(`SELECT host, COUNT(*) AS n, MAX(ts) AS last FROM exchanges WHERE `+cond+` GROUP BY host ORDER BY last DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []HostCount
+	for rows.Next() {
+		var h HostCount
+		var last int64
+		if err := rows.Scan(&h.Host, &h.Count, &last); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
 // Count returns total recorded exchanges.
 func (t *Traffic) Count() (int, error) {
 	var n int

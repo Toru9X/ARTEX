@@ -462,9 +462,17 @@ func (s *Server) httpProxyTransport(spec httpExec) *http.Transport {
 	proxyStr := strings.TrimSpace(spec.Proxy)
 	var caFile string
 	if spec.UseRecordingProxy {
-		if addr := s.m.ProxyAddr(); addr != "" {
-			proxyStr = "http://" + addr
-			caFile = s.m.ProxyCACert()
+		// ProxyAddr is already a complete URL while capture is on, and the global
+		// proxy is already a complete URL when capture is off. Keep both forms
+		// intact, including socks5:// and any credentials: prefixing http:// a
+		// second time corrupts them.
+		if s.m.TrafficEnabled() {
+			if addr := s.m.ProxyAddr(); addr != "" {
+				proxyStr = addr
+				caFile = s.m.ProxyCACert()
+			}
+		} else if global := strings.TrimSpace(s.m.GlobalProxy()); global != "" {
+			proxyStr = global
 		}
 	}
 	if proxyStr == "" {

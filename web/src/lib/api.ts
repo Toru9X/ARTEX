@@ -80,6 +80,8 @@ import type {
   PromptVersion,
   ProxyPoolEntry,
   ProxySwitchLog,
+  RepeaterSendRequest,
+  RepeaterSendResponse,
   SessionTokenUsage,
   Settings,
   Severity,
@@ -446,6 +448,7 @@ export const api = {
   // Asset coverage graph: every in-scope asset + root-domain/company nodes used for connection, with tested/in_scope.
   taskCoverageGraph: (id: string) => get<CoverageGraphData>(`/tasks/${id}/coverage-graph`),
   // Global llm_usage aggregate (the dashboard's new token view): totals per profile + daily buckets.
+  repeaterSend: (req: RepeaterSendRequest) => post<RepeaterSendResponse>("/repeater/send", req),
   // ---- topology mapping (the asset_mapper agent) ----
   startTopologyMapping: (id: string) =>
     post<{ status: string; agent_key: string; conversation_id: number }>(`/tasks/${id}/topology-mapping`, {}),

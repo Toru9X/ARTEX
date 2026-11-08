@@ -2,10 +2,15 @@
 
 import * as React from "react";
 
+import { useRouter } from "next/navigation";
+
 import { ChevronDownIcon, ChevronRightIcon, LoaderCircleIcon } from "lucide-react";
+import { toast } from "sonner";
 
 import { HttpCodeBlock } from "@/components/http-code-block";
 import { Markdown } from "@/components/markdown";
+import { headersFromReqHead, requestFromEvidence } from "@/components/repeater/repeater-http";
+import { seedFromEvidence } from "@/components/repeater/repeater-store";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -107,6 +112,8 @@ function PacketDisclosure({
   const [open, setOpen] = React.useState(false);
   const [detail, setDetail] = React.useState<FindingTrafficDetail | null>(null);
   const [error, setError] = React.useState("");
+  const [repeaterBusy, setRepeaterBusy] = React.useState(false);
+  const router = useRouter();
 
   React.useEffect(() => {
     if (!open || !bindingId || detail) return;
@@ -131,6 +138,34 @@ function PacketDisclosure({
     );
   }
 
+  async function sendToRepeater() {
+    if (!detail) return;
+    setRepeaterBusy(true);
+    try {
+      if (detail.request.binary)
+        toast.info("The request body is binary and was left empty; download the full body first");
+      else if (detail.request.truncated)
+        toast.info("The request body is a truncated preview; download the full body first");
+      seedFromEvidence(
+        requestFromEvidence(
+          {
+            method: detail.binding.snapshot.method || "GET",
+            url: detail.binding.snapshot.url || "",
+            headersText: headersFromReqHead(detail.binding.snapshot.req_head),
+            body: detail.request.binary ? "" : detail.request.content || "",
+          },
+          detail.binding.snapshot.req_head,
+        ),
+        { findingId, bindingId: detail.binding.id },
+      );
+      router.push("/function/repeater");
+    } catch (e) {
+      toast.error(`Could not send it to the repeater: ${(e as Error).message}`);
+    } finally {
+      setRepeaterBusy(false);
+    }
+  }
+
   return (
     <div className="mt-3 border-t pt-3">
       <div className="flex flex-wrap gap-2">
@@ -145,6 +180,18 @@ function PacketDisclosure({
           {open ? <ChevronDownIcon /> : <ChevronRightIcon />}
           {open ? "Hide the packets" : "Show the packets"}
         </Button>
+        {open && detail ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs"
+            disabled={repeaterBusy}
+            onClick={() => void sendToRepeater()}
+          >
+            {repeaterBusy ? "Preparing…" : "Send to the repeater"}
+          </Button>
+        ) : null}
       </div>
       {open ? (
         <div className="mt-3 rounded-lg border bg-muted/20 p-3">

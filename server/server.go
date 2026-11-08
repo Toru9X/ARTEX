@@ -830,6 +830,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/companies/reattribute", s.reattribute)
 
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
+	s.registerRepeater(mux)
 	mux.HandleFunc("POST /api/tasks/{id}/topology-mapping", s.taskAssetMapping)
 	mux.HandleFunc("GET /api/tasks/{id}/topology-mapping/status", s.taskAssetMappingStatus)
 	// The asset-mapping spelling is the same handler: both canvases start one run.
@@ -3410,12 +3411,36 @@ func (s *Server) getTrafficHosts(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"hosts": []any{}})
 		return
 	}
-	hosts, err := tr.Hosts()
+	// With task_id, the picker is scoped to that task's own hosts: an empty
+	// scope then means no hosts, never every host the proxy ever saw.
+	var hosts []string
+	if rawTaskID := strings.TrimSpace(r.URL.Query().Get("task_id")); rawTaskID != "" {
+		taskID, err := strconv.ParseInt(rawTaskID, 10, 64)
+		if err != nil || taskID <= 0 || s.m.ResolveTask(rawTaskID) == nil {
+			writeErr(w, http.StatusNotFound, "task not found")
+			return
+		}
+		hosts, err = s.m.Assets().HostsByTaskWithSources(taskID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	var result []traffic.HostCount
+	var err error
+	switch {
+	case len(hosts) > 0:
+		result, err = tr.HostsForScope(hosts)
+	case r.URL.Query().Get("task_id") != "":
+		result = []traffic.HostCount{}
+	default:
+		result, err = tr.Hosts()
+	}
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"hosts": hosts})
+	writeJSON(w, 200, map[string]any{"hosts": result})
 }
 
 // deleteTraffic removes recorded traffic for every host containing the query's

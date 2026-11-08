@@ -1603,6 +1603,31 @@ export interface ConvTokenSummary {
   cache_write_tokens: number;
 }
 
+// ---- Repeater (resend and edit one HTTP request) ----
+export interface RepeaterSendRequest {
+  method: string;
+  http_version?: string;
+  url: string;
+  headers?: Record<string, string>;
+  body?: string;
+  timeout_ms?: number;
+  insecure_skip_verify?: boolean;
+  use_recording_proxy?: boolean;
+}
+
+export interface RepeaterSendResponse {
+  status: number;
+  status_text: string;
+  proto: string;
+  headers: Record<string, string[]>;
+  body: string;
+  body_truncated: boolean;
+  body_bytes: number;
+  elapsed_ms: number;
+  url: string;
+  error?: string;
+}
+
 // ---- Finding cases (repeated reports of one defect, grouped) ----
 export interface FindingDistinctStats {
   total: number;
