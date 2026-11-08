@@ -19,6 +19,7 @@ import {
 import { toast } from "sonner";
 
 import { AssetDslSearch } from "@/components/asset-dsl-search";
+import { IntelligencePanel } from "@/components/intelligence-panel";
 import { ScopeTextEditor } from "@/components/scope-text-editor";
 import {
   AlertDialog,
@@ -108,6 +109,8 @@ const TABS: { key: string; label: string; icon: LucideIcon }[] = [
 ];
 
 export default function AssetsPage() {
+  // The asset whose linked intelligence is open in the dialog; null means closed.
+  const [intelligenceAsset, setIntelligenceAsset] = React.useState<number | null>(null);
   const [rows, setRows] = React.useState<Asset[]>([]);
   const [total, setTotal] = React.useState(0);
   const [companies, setCompanies] = React.useState<Company[]>([]);
@@ -314,6 +317,27 @@ export default function AssetsPage() {
 
   return (
     <div className="flex h-[calc(100vh-6rem)] min-h-0 flex-col gap-4">
+      <Dialog
+        open={intelligenceAsset !== null}
+        onOpenChange={(open) => {
+          if (!open) setIntelligenceAsset(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-5xl">
+          <DialogHeader>
+            <DialogTitle>Intelligence linked to asset #{intelligenceAsset}</DialogTitle>
+            <DialogDescription>Credentials, leads and sensitive data, by the task that found them.</DialogDescription>
+          </DialogHeader>
+          {intelligenceAsset !== null ? (
+            <IntelligencePanel
+              key={intelligenceAsset}
+              scope="assets"
+              scopeId={String(intelligenceAsset)}
+              onNavigate={() => setIntelligenceAsset(null)}
+            />
+          ) : null}
+        </DialogContent>
+      </Dialog>
       <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Assets</h1>
@@ -322,6 +346,17 @@ export default function AssetsPage() {
           <span className="text-sm text-muted-foreground">
             <span className="tabular-nums">{totalAssets}</span> assets in total
           </span>
+          {tab !== "company" ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={selected.size !== 1}
+              title="Select exactly one asset to see its linked intelligence"
+              onClick={() => setIntelligenceAsset(Array.from(selected)[0] as number)}
+            >
+              Linked intelligence
+            </Button>
+          ) : null}
           {selected.size > 0 && (
             <Button variant="destructive" size="sm" onClick={() => openDelete(Array.from(selected) as number[])}>
               <Trash2Icon className="size-3.5" /> Delete selected ({selected.size})
@@ -406,7 +441,8 @@ export default function AssetsPage() {
                   {companies.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={4} className="py-10 text-center text-sm text-muted-foreground">
-                        No companies yet. Click "Add company" in the top-right corner and fill in the asset scope; the system will automatically claim matching assets.
+                        No companies yet. Click "Add company" in the top-right corner and fill in the asset scope; the
+                        system will automatically claim matching assets.
                       </TableCell>
                     </TableRow>
                   )}
@@ -739,8 +775,8 @@ export default function AssetsPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Confirm delete</AlertDialogTitle>
             <AlertDialogDescription>
-              This will permanently delete <span className="font-semibold tabular-nums">{deleteIds.length}</span>{" "}
-               asset records. This action cannot be undone.
+              This will permanently delete <span className="font-semibold tabular-nums">{deleteIds.length}</span> asset
+              records. This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -773,7 +809,10 @@ export default function AssetsPage() {
             <AlertDialogTitle>Delete company · {companyDeleteTarget?.name}</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
-                <p>This will permanently delete the company and its asset scope configuration. This action cannot be undone.</p>
+                <p>
+                  This will permanently delete the company and its asset scope configuration. This action cannot be
+                  undone.
+                </p>
                 <label
                   htmlFor="delete-assets-opt"
                   className="flex cursor-pointer items-center gap-2.5 rounded-md border p-3 hover:bg-muted/50"
@@ -785,7 +824,9 @@ export default function AssetsPage() {
                   />
                   <span className="text-sm leading-snug">
                     Also delete all assets under this company
-                    <span className="block text-xs text-muted-foreground">Leave unchecked to keep the assets and only remove the ownership</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Leave unchecked to keep the assets and only remove the ownership
+                    </span>
                   </span>
                 </label>
               </div>
@@ -1022,7 +1063,10 @@ function CompanyDialog({ onSaved }: { onSaved: () => void }) {
       <SheetContent className="w-full! max-w-none! gap-0 p-0 sm:w-[520px]! sm:max-w-[520px]!">
         <SheetHeader className="border-b p-6">
           <SheetTitle>Add company</SheetTitle>
-          <SheetDescription>Configure the company and its asset scope. Keywords only serve as agent hints and do not automatically assign assets.</SheetDescription>
+          <SheetDescription>
+            Configure the company and its asset scope. Keywords only serve as agent hints and do not automatically
+            assign assets.
+          </SheetDescription>
         </SheetHeader>
         <div className="flex-1 overflow-y-auto p-6">
           <FieldGroup>
@@ -1183,7 +1227,10 @@ function AppendScopeDialog({ company, onSaved }: { company: Company; onSaved: ()
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Append asset scope · {company.name}</DialogTitle>
-          <DialogDescription>New scopes are appended to the existing ones. ICP matches assets exactly; company keywords only serve as agent hints.</DialogDescription>
+          <DialogDescription>
+            New scopes are appended to the existing ones. ICP matches assets exactly; company keywords only serve as
+            agent hints.
+          </DialogDescription>
         </DialogHeader>
         <FieldGroup className="py-2">
           <ScopeTextEditor

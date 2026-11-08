@@ -46,9 +46,9 @@ const stagnationMinRepeats = 3
 
 func detectStagnation(done, findings []*db.Node) []map[string]any {
 	type dir struct {
-		firstID  int64
-		repeats  int
-		summary  string
+		firstID int64
+		repeats int
+		summary string
 	}
 	dirs := map[string]*dir{}
 	order := []string{}
@@ -231,15 +231,23 @@ type WriteCounts struct {
 	Facts    int
 	Assets   int
 	Findings int
+	// Intelligence counts credentials, leads and sensitive data recorded this
+	// run. It counts toward Total so a run that only produced intelligence is
+	// not reported as "explored but persisted nothing".
+	Intelligence int
 }
 
 // Total is every node persisted this run, regardless of kind — the
 // "explored but persisted nothing" signal (Total == 0).
-func (w WriteCounts) Total() int { return w.Facts + w.Assets + w.Findings }
+func (w WriteCounts) Total() int { return w.Facts + w.Assets + w.Findings + w.Intelligence }
 
 // String renders the per-kind breakdown for logs, e.g. "facts=1 assets=25 findings=0".
 func (w WriteCounts) String() string {
-	return fmt.Sprintf("facts=%d assets=%d findings=%d", w.Facts, w.Assets, w.Findings)
+	summary := fmt.Sprintf("facts=%d assets=%d findings=%d", w.Facts, w.Assets, w.Findings)
+	if w.Intelligence > 0 {
+		summary += fmt.Sprintf(" intelligence=%d", w.Intelligence)
+	}
+	return summary
 }
 
 // Writes reports what this run wrote back, split by node kind (so the engine can
@@ -540,7 +548,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// with the data so no prompt-template change is needed on deployed installs.
 	if stale := detectStagnation(recentDone, vulnNodes); len(stale) > 0 {
 		out["stagnation_warning"] = map[string]any{
-			"directions": stale,
+			"directions":  stale,
 			"instruction": "these directions were dispatched repeatedly with zero findings produced since their first attempt — do NOT re-dispatch the same approach again; open a materially different direction, or judge the goal on the existing evidence instead of grinding",
 		}
 	}
@@ -1431,12 +1439,15 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 // must NOT be stuffed into the asset graph via upsert_asset.
 // factItem is one fact of a record_fact batch/single call.
 type factItem struct {
-	Summary    string            `json:"summary"`
-	Detail     string            `json:"detail"`
-	Evidence   string            `json:"evidence"`   // one line of key evidence (command + key output lines) supporting the conclusion, for later verification
-	Confidence string            `json:"confidence"` // observed (seen directly) | inferred (inferred from phenomena)
-	IntentID   json.RawMessage   `json:"intent_id"`
-	AssetIDs   []json.RawMessage `json:"asset_ids"`
+	// Intelligence lets a fact carry its credentials/leads in the same call,
+	// so the agent does not have to follow every fact with a second tool call.
+	Intelligence []db.IntelligenceInput `json:"intelligence"`
+	Summary      string                 `json:"summary"`
+	Detail       string                 `json:"detail"`
+	Evidence     string                 `json:"evidence"`   // one line of key evidence (command + key output lines) supporting the conclusion, for later verification
+	Confidence   string                 `json:"confidence"` // observed (seen directly) | inferred (inferred from phenomena)
+	IntentID     json.RawMessage        `json:"intent_id"`
+	AssetIDs     []json.RawMessage      `json:"asset_ids"`
 }
 
 // recordOneFact writes one fact node and links it to the intent (intent→yields→fact).
@@ -1495,7 +1506,7 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 			"confidence": str("observed (seen directly in output) | inferred (inferred from phenomena). Always label negative conclusions honestly."),
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "related asset ids (optional, 0/1/many): which assets this fact involves"},
 		}),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Facts    []factItem `json:"facts"`
 				factItem            // single mode + batch default intent_id
@@ -1517,6 +1528,23 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 					continue
 				}
 				ids[i] = id
+				if intelligenceEnabled() {
+					if len(it.Intelligence) > 20 {
+						errs[strconv.Itoa(i)] = "the fact was saved; at most 20 intelligence entries per fact"
+						continue
+					}
+					for _, intel := range it.Intelligence {
+						// Inherit the fact's assets when the entry names none,
+						// so the intelligence is attributed like the fact is.
+						if len(intel.AssetIDs) == 0 {
+							intel.AssetIDs = pidList(it.AssetIDs)
+						}
+						if _, err := t.saveIntelligence(ctx, id, intel); err != nil {
+							errs[strconv.Itoa(i)] = fmt.Sprintf("fact #%d was saved, its intelligence was not: %s", id, err)
+							break
+						}
+					}
+				}
 			}
 
 			if !batch { // single: keep the original return

@@ -563,7 +563,7 @@ func remapArchiveAssetReferences(tables map[string]json.RawMessage, mapping map[
 		}
 		out[table], _ = json.Marshal(rows)
 	}
-	for _, table := range []string{"exploration_nodes", "findings"} {
+	for _, table := range []string{"exploration_nodes", "findings", "task_intelligence"} {
 		rows, err := decodeArchiveRows(tables[table])
 		if err != nil {
 			return nil, err
@@ -587,6 +587,21 @@ func remapArchiveAssetReferences(tables map[string]json.RawMessage, mapping map[
 					}
 				}
 				container[key] = values
+			}
+		}
+		if table == "task_intelligence" {
+			// The fingerprint is derived from the content plus the asset ids,
+			// so remapping the ids must recompute it; otherwise the restored
+			// row would no longer de-duplicate against a fresh discovery.
+			for _, row := range rows {
+				raw, _ := json.Marshal(row)
+				var input IntelligenceInput
+				if err := json.Unmarshal(raw, &input); err != nil {
+					return nil, err
+				}
+				// Only the fingerprint is recomputed: status is human triage
+				// and must survive, even where the observation was inferred.
+				row["fingerprint"] = intelligenceFingerprint(input)
 			}
 		}
 		out[table], _ = json.Marshal(rows)

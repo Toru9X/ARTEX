@@ -55,6 +55,13 @@ export default function SystemSettingsPage() {
   const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
+  const [intelligenceEnabled, setIntelligenceEnabled] = React.useState(false);
+  const [credentialAgent, setCredentialAgent] = React.useState(false);
+  const [credentialBinding, setCredentialBinding] = React.useState(false);
+  const [savingIntelligence, setSavingIntelligence] = React.useState(false);
+  const [savingCredentials, setSavingCredentials] = React.useState(false);
+  const [taskAutoTitleEnabled, setTaskAutoTitleEnabled] = React.useState(false);
+  const [chatAutoTitleEnabled, setChatAutoTitleEnabled] = React.useState(false);
   // The full settings object, so child cards can read fields the page itself
   // does not keep in its own state.
   const [settings, setSettings] = React.useState<Settings | null>(null);
@@ -101,6 +108,11 @@ export default function SystemSettingsPage() {
     setNoaCompaction(!!s.noa_compaction);
     setOpsecEnabled(!!s.opsec_enabled);
     setProbeUrlInput(s.egress_probe_url ?? "");
+    setIntelligenceEnabled(!!s.task_intelligence_enabled);
+    setCredentialAgent(!!s.credential_agent_enabled);
+    setCredentialBinding(!!s.credential_traffic_binding);
+    setTaskAutoTitleEnabled(!!s.task_auto_title_enabled);
+    setChatAutoTitleEnabled(!!s.chat_auto_title_enabled);
   }, []);
 
   const saveWorkers = () => {
@@ -226,12 +238,44 @@ export default function SystemSettingsPage() {
       .setSettings({ noa_compaction: v })
       .then((s) => {
         apply(s);
-        toast.success(v ? "Enabled noa context compaction (applies to runs started afterwards)" : "Disabled noa context compaction (built-in compaction restored)");
+        toast.success(
+          v
+            ? "Enabled noa context compaction (applies to runs started afterwards)"
+            : "Disabled noa context compaction (built-in compaction restored)",
+        );
       })
       .catch((e) => {
         setNoaCompaction(!v); // revert on failure
         toast.error(`Save failed: ${(e as Error).message}`);
       });
+  };
+
+  const toggleAutoTitle = (key: "task_auto_title_enabled" | "chat_auto_title_enabled", value: boolean) => {
+    const setter = key === "task_auto_title_enabled" ? setTaskAutoTitleEnabled : setChatAutoTitleEnabled;
+    setter(value); // optimistic
+    api
+      .setSettings(
+        key === "task_auto_title_enabled" ? { task_auto_title_enabled: value } : { chat_auto_title_enabled: value },
+      )
+      .then(apply)
+      .catch((e) => {
+        setter(!value); // revert on failure
+        toast.error(`Save failed: ${(e as Error).message}`);
+      });
+  };
+
+  // The three intelligence switches are written together by the backend, so the
+  // response is the single source of truth for all three after any one changes.
+  const saveCredentialOptions = async (patch: Partial<Settings>) => {
+    setSavingCredentials(true);
+    try {
+      apply(await api.setSettings(patch));
+      toast.success("Credential settings saved");
+    } catch (e) {
+      toast.error(`Save failed: ${(e as Error).message}`);
+    } finally {
+      setSavingCredentials(false);
+    }
   };
 
   // Persist a web-search patch (enable and/or backend). Optimistic with refetch.
@@ -345,11 +389,13 @@ export default function SystemSettingsPage() {
               Traffic capture
             </CardTitle>
             <CardDescription>
-              When enabled, every agent's HTTP traffic is stored in full through the recording proxy, and agents are injected with the traffic_search / traffic_get
-              tools and proxy configuration (the prompt includes proxy notes).
+              When enabled, every agent's HTTP traffic is stored in full through the recording proxy, and agents are
+              injected with the traffic_search / traffic_get tools and proxy configuration (the prompt includes proxy
+              notes).
               <br />
-              When off (default) no traffic is recorded: the agent
-              does <b>not</b> receive proxy configuration or traffic tools, and the prompt contains <b>no</b> proxy-related content. Agents are rebuilt immediately after switching.
+              When off (default) no traffic is recorded: the agent does <b>not</b> receive proxy configuration or
+              traffic tools, and the prompt contains <b>no</b> proxy-related content. Agents are rebuilt immediately
+              after switching.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex items-center justify-between gap-4">
@@ -372,11 +418,13 @@ export default function SystemSettingsPage() {
               Automatic agent traffic binding
             </CardTitle>
             <CardDescription id="agent-traffic-binding-description">
-              Off by default. When enabled, the report agent triggered on vulnerability creation reviews existing HTTP requests/responses and links the matching traffic before writing the report.
+              Off by default. When enabled, the report agent triggered on vulnerability creation reviews existing HTTP
+              requests/responses and links the matching traffic before writing the report.
               <b>Reading packets and the extra tool calls increase token consumption.</b>
               <br />
-              Reporting still works for TCP, uncaptured traffic, or when no traffic matches. This switch does not affect traffic capture, manual binding, or viewing saved evidence. It takes effect for the
-              next round of agents; once disabled, new automatic bindings are rejected immediately.
+              Reporting still works for TCP, uncaptured traffic, or when no traffic matches. This switch does not affect
+              traffic capture, manual binding, or viewing saved evidence. It takes effect for the next round of agents;
+              once disabled, new automatic bindings are rejected immediately.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex items-center justify-between gap-4">
@@ -400,11 +448,13 @@ export default function SystemSettingsPage() {
               Global proxy
             </CardTitle>
             <CardDescription>
-              All agents' <b>target traffic</b> egresses through this proxy (hide the source IP / use a jump host). Supports <b>http / https / socks5</b>, optionally with{" "}
-              <code>user:pass</code> authentication. Empty = direct connection.
+              All agents' <b>target traffic</b> egresses through this proxy (hide the source IP / use a jump host).
+              Supports <b>http / https / socks5</b>, optionally with <code>user:pass</code> authentication. Empty =
+              direct connection.
               <br />
-              With <b>traffic capture</b> on, it acts as the recording proxy's <b>upstream</b> (traffic is still stored in full, then egresses through this proxy); with capture off, it is injected directly into
-              the agent's bash / WebFetch egress. Independent of the web search proxy and the LLM proxy.
+              With <b>traffic capture</b> on, it acts as the recording proxy's <b>upstream</b> (traffic is still stored
+              in full, then egresses through this proxy); with capture off, it is injected directly into the agent's
+              bash / WebFetch egress. Independent of the web search proxy and the LLM proxy.
               <br />
               <b>Note</b>: with <b>capture off</b>, socks5 relies on each CLI tool honoring <code>ALL_PROXY</code> (curl
               works; some tools may ignore it). If you mainly use socks5, enable traffic capture — on that path the MITM
@@ -429,7 +479,9 @@ export default function SystemSettingsPage() {
               </Button>
             </div>
             <p className="text-muted-foreground text-xs">
-              {globalProxyInput.trim() ? "Configured · all target traffic egresses through this proxy" : "Not configured · target traffic egresses directly"}
+              {globalProxyInput.trim()
+                ? "Configured · all target traffic egresses through this proxy"
+                : "Not configured · target traffic egresses directly"}
             </p>
           </CardContent>
         </Card>
@@ -445,9 +497,9 @@ export default function SystemSettingsPage() {
               reports two exit IPs: <b>(1)</b> going direct and <b>(2)</b> through the proxy. The address in the field
               above is tested even before you save it, so the result may differ from what the agent currently uses; the
               warnings say when that is the case.
-              <br />
-              A <b>custom endpoint</b> is usually an intranet echo service, so private ranges are allowed. Loopback and
-              link-local are refused: inside a container those reach ARTEX itself and the cloud metadata service.
+              <br />A <b>custom endpoint</b> is usually an intranet echo service, so private ranges are allowed.
+              Loopback and link-local are refused: inside a container those reach ARTEX itself and the cloud metadata
+              service.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
@@ -524,11 +576,13 @@ export default function SystemSettingsPage() {
               Operation constraint injection
             </CardTitle>
             <CardDescription>
-              When enabled, each task's <b>operation constraints</b> (the allow/deny entries maintained under "Operation constraints" in the task overview) are spliced into the corresponding agent's
-              system prompt to bound the exploration scope (e.g. "only test the current port", "no brute forcing").
+              When enabled, each task's <b>operation constraints</b> (the allow/deny entries maintained under "Operation
+              constraints" in the task overview) are spliced into the corresponding agent's system prompt to bound the
+              exploration scope (e.g. "only test the current port", "no brute forcing").
               <br />
-              You can control injection into the <b>planner</b> and the <b>worker</b> separately
-              ; both are on by default. Switching takes effect immediately (read on the next turn) without rebuilding agents. When off, the agent no longer sees the constraints.
+              You can control injection into the <b>planner</b> and the <b>worker</b> separately ; both are on by
+              default. Switching takes effect immediately (read on the next turn) without rebuilding agents. When off,
+              the agent no longer sees the constraints.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
@@ -564,12 +618,14 @@ export default function SystemSettingsPage() {
               OPSEC rules
             </CardTitle>
             <CardDescription>
-              When enabled, a fixed block of <b>operational safety rules</b> is appended to every agent's system prompt: reuse recorded traffic
-              before issuing a fresh request, reach the target only through the recording proxy or the browser tools, never bypass certificate
-              validation, and stop on a rate limit, CAPTCHA or WAF instead of hammering through.
+              When enabled, a fixed block of <b>operational safety rules</b> is appended to every agent's system prompt:
+              reuse recorded traffic before issuing a fresh request, reach the target only through the recording proxy
+              or the browser tools, never bypass certificate validation, and stop on a rate limit, CAPTCHA or WAF
+              instead of hammering through.
               <br />
-              The block lives <b>in code</b>, not in the editable prompt body, so editing a prompt under "Agents" cannot remove it. It does{" "}
-              <b>not</b> widen the authorized scope. Switching takes effect from the next agent round without rebuilding agents.
+              The block lives <b>in code</b>, not in the editable prompt body, so editing a prompt under "Agents" cannot
+              remove it. It does <b>not</b> widen the authorized scope. Switching takes effect from the next agent round
+              without rebuilding agents.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex items-center justify-between gap-4">
@@ -587,12 +643,15 @@ export default function SystemSettingsPage() {
               Experimental features
             </CardTitle>
             <CardDescription>
-              Mechanisms still being validated, off by default. They may change agent behavior or affect stability; enable only after understanding the impact.
+              Mechanisms still being validated, off by default. They may change agent behavior or affect stability;
+              enable only after understanding the impact.
               <br />
-              <b>noa context compaction</b>: the model actively compacts long conversation history (norma v0.4.0). When enabled, the four agent types integrated into the platform (
-              <b>planner / worker / main agent / chat</b>) switch to noa-managed context in place of the built-in compaction,
-              and the pre-compaction originals are archived under the task working directory for later review. Switching takes effect immediately (for runs started afterwards) without rebuilding agents;
-              when disabled, the built-in compaction is restored immediately.
+              <b>noa context compaction</b>: the model actively compacts long conversation history (norma v0.4.0). When
+              enabled, the four agent types integrated into the platform (<b>planner / worker / main agent / chat</b>)
+              switch to noa-managed context in place of the built-in compaction, and the pre-compaction originals are
+              archived under the task working directory for later review. Switching takes effect immediately (for runs
+              started afterwards) without rebuilding agents; when disabled, the built-in compaction is restored
+              immediately.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex items-center justify-between gap-4">
@@ -610,24 +669,126 @@ export default function SystemSettingsPage() {
 
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>
+            <CardTitle className="text-base">Auto title</CardTitle>
+            <CardDescription>
+              Generate a short title for agent-created tasks and from a chat's first message. The two switches are
+              independent and both default to off.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-5">
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="task-auto-title" className="text-sm font-normal text-muted-foreground">
+                Task name — named when an agent creates the task; on failure the task stays unnamed.
+              </Label>
+              <Switch
+                id="task-auto-title"
+                checked={taskAutoTitleEnabled}
+                disabled={!loaded}
+                onCheckedChange={(value) => toggleAutoTitle("task_auto_title_enabled", value)}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="chat-auto-title" className="text-sm font-normal text-muted-foreground">
+                Session title — named after the first message; the truncated message is shown until then, and kept on
+                failure.
+              </Label>
+              <Switch
+                id="chat-auto-title"
+                checked={chatAutoTitleEnabled}
+                disabled={!loaded}
+                onCheckedChange={(value) => toggleAutoTitle("chat_auto_title_enabled", value)}
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="text-base">Task intelligence</CardTitle>
+            <CardDescription>
+              Record the credentials, leads and sensitive data a task turns up, together with the evidence they came
+              from.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-5">
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="task-intelligence" className="text-sm font-normal text-muted-foreground">
+                Agent recording — off by default. Agents report credentials, leads and sensitive data as they run, which
+                adds prompt and report tokens. It only records; it does not start credential extraction. Turning it off
+                also disables the two switches below; what was already recorded stays readable.
+              </Label>
+              <Switch
+                id="task-intelligence"
+                checked={intelligenceEnabled}
+                disabled={!loaded || savingIntelligence || savingCredentials}
+                onCheckedChange={async (value) => {
+                  setSavingIntelligence(true);
+                  try {
+                    apply(await api.setSettings({ task_intelligence_enabled: value }));
+                    toast.success(value ? "Intelligence recording enabled" : "Intelligence recording disabled");
+                  } catch (error) {
+                    toast.error(`Save failed: ${(error as Error).message}`);
+                  } finally {
+                    setSavingIntelligence(false);
+                  }
+                }}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="credential-agent" className="text-sm font-normal text-muted-foreground">
+                Credential extractor — off by default. Splits recorded credentials into username, password, token and
+                cookie without changing the original report or its status. Parsable JSON needs no model; free text costs
+                extra tokens. Requires agent recording above.
+              </Label>
+              <Switch
+                id="credential-agent"
+                checked={credentialAgent}
+                disabled={!loaded || savingCredentials || savingIntelligence || !intelligenceEnabled}
+                onCheckedChange={(value) => void saveCredentialOptions({ credential_agent_enabled: value })}
+              />
+            </div>
+            {credentialAgent ? (
+              <div className="flex items-center justify-between gap-4">
+                <Label htmlFor="credential-traffic" className="text-sm font-normal text-muted-foreground">
+                  Bind to traffic — off by default, available only while the extractor is on. Matches extracted
+                  credentials against captured traffic and saves the matching excerpt. It never logs in, and a match is
+                  not proof that the credential works. Existing bindings are kept when it is turned off.
+                </Label>
+                <Switch
+                  id="credential-traffic"
+                  checked={credentialBinding}
+                  disabled={!loaded || savingCredentials}
+                  onCheckedChange={(value) => void saveCredentialOptions({ credential_traffic_binding: value })}
+                />
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <SearchIcon className="size-4" />
               Web search
             </CardTitle>
             <CardDescription>
-              This is the web search <b>master switch + source config</b>. Only when it is enabled can <b>each agent's config</b> separately choose whether to enable
-              <b>web_search</b> (returns only titles/links/snippets without fetching bodies; fetching is handled by WebFetch). Web search does <b>not</b> go through
-              the recording proxy and is independent of traffic capture.
+              This is the web search <b>master switch + source config</b>. Only when it is enabled can{" "}
+              <b>each agent's config</b> separately choose whether to enable
+              <b>web_search</b> (returns only titles/links/snippets without fetching bodies; fetching is handled by
+              WebFetch). Web search does <b>not</b> go through the recording proxy and is independent of traffic
+              capture.
               <br />
               Sources: <b>DuckDuckGo (ddgs)</b> (no key needed), <b>Brave (free tier)</b> (requires a Brave API Key),{" "}
-              <b>Tavily</b> (requires a Tavily API Key) or <b>DeepSeek</b> (reuses the current LLM config). When the master switch is off, the
-              per-agent web search switches are unavailable.
+              <b>Tavily</b> (requires a Tavily API Key) or <b>DeepSeek</b> (reuses the current LLM config). When the
+              master switch is off, the per-agent web search switches are unavailable.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             <div className="flex items-center justify-between gap-4">
               <Label htmlFor="web-search" className="text-sm font-normal text-muted-foreground">
-                {webSearch ? "Master switch on · can be enabled per agent config" : "Off · agents cannot enable web search"}
+                {webSearch
+                  ? "Master switch on · can be enabled per agent config"
+                  : "Off · agents cannot enable web search"}
               </Label>
               <Switch
                 id="web-search"
@@ -668,17 +829,20 @@ export default function SystemSettingsPage() {
               <div className="border-border/60 bg-muted/30 flex flex-col gap-2 rounded-md border p-3">
                 <p className="text-sm font-medium">DeepSeek official web search</p>
                 <p className="text-muted-foreground text-xs leading-relaxed">
-                  This source directly reuses the <b>currently active LLM config</b>. It therefore
-                  supports <b>official DeepSeek models only</b>, and that config <b>must use the anthropic protocol</b>
-                  — DeepSeek's OpenAI-protocol endpoint does not support server-side search. This source may stop working after switching LLM configs.
+                  This source directly reuses the <b>currently active LLM config</b>. It therefore supports{" "}
+                  <b>official DeepSeek models only</b>, and that config <b>must use the anthropic protocol</b>—
+                  DeepSeek's OpenAI-protocol endpoint does not support server-side search. This source may stop working
+                  after switching LLM configs.
                 </p>
                 <p className="text-muted-foreground text-xs leading-relaxed">
-                  Unlike other sources, the search runs <b>server-side on DeepSeek</b>: each search consumes an extra model call (incurring token
-                  costs), search requests <b>do not go through the egress proxy above</b> and are <b>not recorded as traffic</b>; results contain <b>titles and links only</b>
+                  Unlike other sources, the search runs <b>server-side on DeepSeek</b>: each search consumes an extra
+                  model call (incurring token costs), search requests <b>do not go through the egress proxy above</b>{" "}
+                  and are <b>not recorded as traffic</b>; results contain <b>titles and links only</b>
                   (no snippets); use WebFetch when you need the page body.
                 </p>
                 <p className="text-muted-foreground text-xs leading-relaxed">
-                  Verify these conditions yourself; the system does not block on them. Use the "Test search" button below to run a real search and check.
+                  Verify these conditions yourself; the system does not block on them. Use the "Test search" button
+                  below to run a real search and check.
                 </p>
               </div>
             )}
@@ -770,7 +934,8 @@ export default function SystemSettingsPage() {
                   </Button>
                 </div>
                 <p className="text-muted-foreground text-xs">
-                  A dedicated egress proxy used only to reach search endpoints (VPN/SOCKS etc.). Unrelated to the traffic-recording MITM proxy; use it to reach endpoints when the network is blocked.
+                  A dedicated egress proxy used only to reach search endpoints (VPN/SOCKS etc.). Unrelated to the
+                  traffic-recording MITM proxy; use it to reach endpoints when the network is blocked.
                 </p>
               </div>
             )}
@@ -801,8 +966,8 @@ export default function SystemSettingsPage() {
               Custom scripts · Python interpreter
             </CardTitle>
             <CardDescription>
-              Custom <b>script</b> tools run Python with it. Auto-detected at startup (python3 first); you can enter an absolute path to a venv /
-              specific version here; leave empty to auto-detect at runtime.
+              Custom <b>script</b> tools run Python with it. Auto-detected at startup (python3 first); you can enter an
+              absolute path to a venv / specific version here; leave empty to auto-detect at runtime.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
@@ -831,7 +996,8 @@ export default function SystemSettingsPage() {
               Work concurrency · worker agent count
             </CardTitle>
             <CardDescription>
-              The number of worker agents running concurrently per task (default 3). Higher values mean more parallel probing and higher consumption. Changes
+              The number of worker agents running concurrently per task (default 3). Higher values mean more parallel
+              probing and higher consumption. Changes
               <b>apply to tasks started afterwards</b>; running tasks are unaffected.
             </CardDescription>
           </CardHeader>
@@ -860,9 +1026,11 @@ export default function SystemSettingsPage() {
               Chat input send key binding
             </CardTitle>
             <CardDescription>
-              Shared by the main-agent chat inputs on the chat page and task details; takes effect immediately on selection, no saving needed.
+              Shared by the main-agent chat inputs on the chat page and task details; takes effect immediately on
+              selection, no saving needed.
               <br />
-              This preference <b>lives only in this browser</b>, does not sync with the account, and must be set again after switching browsers or clearing site data.
+              This preference <b>lives only in this browser</b>, does not sync with the account, and must be set again
+              after switching browsers or clearing site data.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex items-center justify-between gap-4">

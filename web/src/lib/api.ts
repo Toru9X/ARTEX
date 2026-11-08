@@ -16,8 +16,6 @@ import type {
   Asset,
   AssetInterceptRule,
   AssetInterceptRuleInput,
-  TaskCredential,
-  TaskCredentialInput,
   Audit,
   BatchCategoryItem,
   BatchControlItem,
@@ -30,15 +28,13 @@ import type {
   ConvTokenSummary,
   CoverageAssetRefs,
   CoverageGraphData,
+  CredentialTrafficDetail,
   DailyTokenBucket,
   DeleteTaskOptions,
   DeleteTaskResult,
   Edge,
-  EvidenceBodyPreview,
   EgressReport,
-  ProxyPoolEntry,
-  TaskSchedule,
-  ProxySwitchLog,
+  EvidenceBodyPreview,
   ExplorationNodePage,
   ExplorationNodeQuery,
   Finding,
@@ -52,6 +48,7 @@ import type {
   FindingsPage,
   FindingTraffic,
   FindingTrafficDetail,
+  IntelligencePage,
   IntentAsset,
   InterceptApprovalFilter,
   InterceptApprovalRow,
@@ -77,6 +74,8 @@ import type {
   NotificationMeta,
   PromptVar,
   PromptVersion,
+  ProxyPoolEntry,
+  ProxySwitchLog,
   SessionTokenUsage,
   Settings,
   Severity,
@@ -93,9 +92,13 @@ import type {
   TaskAssetScopeMutation,
   TaskCategory,
   TaskConstraint,
+  TaskCredential,
+  TaskCredentialInput,
   TaskGoal,
+  TaskIntelligence,
   TaskLLMResolutions,
   TaskNode,
+  TaskSchedule,
   TaskScopeRow,
   TaskTemplate,
   TokenTotal,
@@ -868,6 +871,19 @@ export const api = {
   trafficDeleteAll: () => del<{ deleted: number; reclaimed: number }>(`/traffic/all`),
 
   // ---- app settings (runtime toggles) ----
+  // ---- task intelligence (credentials / leads / sensitive data) ----
+  intelligence: (scope: "tasks" | "assets", id: string, query: URLSearchParams) =>
+    get<IntelligencePage>(`/${scope}/${id}/intelligence?${query.toString()}`),
+  intelligenceDetail: (scope: "tasks" | "assets", id: string, intelligenceId: number) =>
+    get<TaskIntelligence>(`/${scope}/${id}/intelligence/${intelligenceId}`),
+  updateIntelligence: (taskId: number, intelligenceId: number, status: string) =>
+    patch<{ updated: boolean }>(`/tasks/${taskId}/intelligence/${intelligenceId}`, { status }),
+  retryCredentials: (taskId: number, intelligenceId: number) =>
+    post<{ queued: boolean }>(`/tasks/${taskId}/intelligence/${intelligenceId}/credentials/retry`),
+  credentialTraffic: (scope: "tasks" | "assets", scopeId: string, intelligenceId: number, trafficId: string) =>
+    get<CredentialTrafficDetail>(
+      `/${scope}/${scopeId}/intelligence/${intelligenceId}/traffic/${encodeURIComponent(trafficId)}`,
+    ),
   settings: () => get<Settings>(`/settings`),
   setSettings: (patch: Partial<Settings>) => put<Settings>(`/settings`, patch),
   // Run a real "test" search with the given (or saved) config to verify it works.
@@ -931,8 +947,7 @@ export const api = {
   // Channels are multi-instance resources (several bots of the same kind, each with its own
   // filter rules), so they form their own group instead of the flat settings key/value store.
   notifyMeta: () => get<NotificationMeta>(`/notify/meta`),
-  notifyChannels: () =>
-    get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
+  notifyChannels: () => get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
   notifyCreateChannel: (payload: {
     name: string;
     kind: string;

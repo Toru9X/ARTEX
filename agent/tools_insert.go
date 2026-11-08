@@ -204,7 +204,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				}, "type"),
 			},
 		}, "assets"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.as == nil {
 				return actool.Errorf("insert_assets is not enabled: AssetStore is not initialized"), nil
 			}
@@ -344,6 +344,26 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				if err != nil {
 					errs = append(errs, errEntry{Index: i, Error: err.Error()})
 					continue
+				}
+				// A service asset reported with credentials registers them as
+				// intelligence here, so the agent never has to report the same
+				// credential twice through a second tool.
+				if intelligenceEnabled() && typ == "service" && taskID > 0 {
+					for _, auth := range item.Auth {
+						raw, _ := json.Marshal(auth)
+						input := db.IntelligenceInput{
+							Kind:       "credential",
+							Title:      fmt.Sprintf("authentication for service #%d", id),
+							Content:    string(raw),
+							Evidence:   fmt.Sprintf("reported by insert_assets, service asset #%d, from intent #%d", id, t.ownerNode),
+							Confidence: "observed",
+							Status:     "unverified",
+							AssetIDs:   []int64{id},
+						}
+						if _, err := t.saveIntelligence(ctx, 0, input); err != nil {
+							errs = append(errs, errEntry{Index: i, Error: "the asset was saved, its credential intelligence was not: " + err.Error()})
+						}
+					}
 				}
 				results = append(results, result{Index: i, ID: id, Type: typ})
 				t.writes.Assets++
@@ -658,7 +678,7 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// list_findings stays: check the task's confirmed findings before reporting, to
 		// avoid reporting the same finding twice.
 		t.listFindings(),
-		t.addFinding(), t.recordFact(),
+		t.addFinding(), t.recordFact(), t.recordIntelligence(),
 		// asset management (handlers guard nil store internally).
 		// add_company_scope is not given to workers: defining a company's asset scope is
 		// the duty of planning/main-control/Auto; a worker only executes exploration.
@@ -700,7 +720,7 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		t.setConstraints(),
 		// asset management (handlers guard nil store internally)
 		t.insertAssets(), t.addCompanyScope(), t.listAssets(),
-		t.addFinding(), t.recordFact(),
+		t.addFinding(), t.recordFact(), t.recordIntelligence(),
 		t.addTaskScope(),
 		// list_untested_assets: query untested assets in this task's scope on demand
 		// (by type + paginated), and decide on supplementary testing yourself.

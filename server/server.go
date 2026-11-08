@@ -147,8 +147,11 @@ type Server struct {
 	// Cold task archives run through one persistent FIFO worker. The buffered wake
 	// channel coalesces enqueue bursts; the database remains the source of truth.
 	archiveWake chan struct{}
-	archiveWG   sync.WaitGroup
-	side        *sideQuestionState
+	// credentialWake nudges the background extractor when a new intelligence
+	// row arrives, so it does not wait out its poll interval.
+	credentialWake chan struct{}
+	archiveWG      sync.WaitGroup
+	side           *sideQuestionState
 }
 
 // provEntry is a cached provider + its config for one LLM profile id.
@@ -181,7 +184,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		proxyPoolWake: make(chan struct{}, 1), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency),
 		profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
-		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1),
+		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1), credentialWake: make(chan struct{}, 1),
 		loginLimit: newLoginLimiter(time.Now)}
 	for _, o := range opts {
 		o(s)
@@ -310,6 +313,16 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	s.restoreTaskRuntimes()
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
+	if m.pg != nil {
+		agent.CredentialRecorded = func() {
+			select {
+			case s.credentialWake <- struct{}{}:
+			default:
+			}
+		}
+		s.seedCredentialProcessor()
+		go s.runCredentialProcessor()
+	}
 	s.wireInterceptReviewer() // LLM fallback approval: commands that hit no interception rule go to the model for judgment
 	return s
 }
@@ -888,6 +901,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/schedules/{id}/pause", s.pauseSchedule)
 	mux.HandleFunc("POST /api/schedules/{id}/resume", s.resumeSchedule)
 	mux.HandleFunc("POST /api/schedules/{id}/run-now", s.runScheduleNow)
+	mux.HandleFunc("GET /api/tasks/{id}/intelligence", s.listIntelligence)
+	mux.HandleFunc("GET /api/tasks/{id}/intelligence/{intelID}", s.getIntelligence)
+	mux.HandleFunc("PATCH /api/tasks/{id}/intelligence/{intelID}", s.updateIntelligence)
+	mux.HandleFunc("POST /api/tasks/{id}/intelligence/{intelID}/credentials/retry", s.retryCredentials)
+	mux.HandleFunc("GET /api/tasks/{id}/intelligence/{intelID}/traffic/{trafficID}", s.credentialTrafficDetail)
+	// The asset-scoped variants share the handlers; scope selects which id the
+	// handler filters on, so one implementation serves both views.
+	mux.HandleFunc("GET /api/assets/{id}/intelligence", func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("scope", "assets")
+		s.listIntelligence(w, r)
+	})
+	mux.HandleFunc("GET /api/assets/{id}/intelligence/{intelID}", func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("scope", "assets")
+		s.getIntelligence(w, r)
+	})
+	mux.HandleFunc("GET /api/assets/{id}/intelligence/{intelID}/traffic/{trafficID}", func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("scope", "assets")
+		s.credentialTrafficDetail(w, r)
+	})
 	mux.HandleFunc("GET /api/report", s.getReport)
 	mux.HandleFunc("GET /api/chat/mentions", s.searchChatMentions)
 	mux.HandleFunc("POST /api/chat", s.chat)
@@ -3516,6 +3548,15 @@ func (s *Server) settingsPayload() map[string]any {
 		// safety rules is appended to every agent's system prompt; read per render, so
 		// a toggle applies from the next agent round.
 		"opsec_enabled": s.m.OpsecEnabled(),
+		// Task intelligence: automatic recording, the LLM credential extractor
+		// and whether extracted credentials are matched back to traffic.
+		"task_intelligence_enabled": s.m.pg.GetBool(db.SettingTaskIntelligence, false),
+		db.SettingCredentialAgent:   s.m.pg.GetBool(db.SettingCredentialAgent, false),
+		db.SettingCredentialTraffic: s.m.pg.GetBool(db.SettingCredentialAgent, false) && s.m.pg.GetBool(db.SettingCredentialTraffic, false),
+		// Auto title: let a small LLM call name a task or a chat from its first
+		// content. Both default off so no extra model call happens unasked.
+		db.SettingTaskAutoTitle: s.m.pg.GetBool(db.SettingTaskAutoTitle, false),
+		db.SettingChatAutoTitle: s.m.pg.GetBool(db.SettingChatAutoTitle, false),
 		// Egress probe: custom IP-echo endpoint (empty = built-in public ones)
 		// and whether the navbar displays the current exit IP.
 		"egress_probe_url": s.m.EgressProbeURL(),
@@ -3629,6 +3670,14 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		ProxyReconnectInterval *int    `json:"proxy_reconnect_interval_seconds"`
 		// WorkerPools replaces the whole pool list; an empty array clears it.
 		WorkerPools *[]WorkerPool `json:"worker_pools"`
+		// Task intelligence switches; written together because the credential
+		// extractor and traffic binding only make sense while recording is on.
+		TaskIntelligence  *bool `json:"task_intelligence_enabled"`
+		CredentialAgent   *bool `json:"credential_agent_enabled"`
+		CredentialTraffic *bool `json:"credential_traffic_binding"`
+		// Auto title switches, independent of each other.
+		TaskAutoTitle *bool `json:"task_auto_title_enabled"`
+		ChatAutoTitle *bool `json:"chat_auto_title_enabled"`
 		// Vulnerability IM push global settings. The delivery engine re-reads all three every round, so changes
 		// take effect immediately with no agent rebuild or restart.
 		NotifyEnabled    *bool   `json:"notify_enabled"`
@@ -3708,6 +3757,21 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		select {
 		case s.proxyPoolWake <- struct{}{}:
 		default:
+		}
+	}
+	if req.TaskIntelligence != nil || req.CredentialAgent != nil || req.CredentialTraffic != nil {
+		if err := s.m.pg.SetIntelligenceSettings(r.Context(), req.TaskIntelligence, req.CredentialAgent, req.CredentialTraffic); err != nil {
+			intelligenceError(w, err)
+			return
+		}
+	}
+	for key, val := range map[string]*bool{db.SettingTaskAutoTitle: req.TaskAutoTitle, db.SettingChatAutoTitle: req.ChatAutoTitle} {
+		if val == nil {
+			continue
+		}
+		if err := s.m.pg.SetBool(key, *val); err != nil {
+			writeErr(w, 500, err.Error())
+			return
 		}
 	}
 	if req.WorkerPools != nil {

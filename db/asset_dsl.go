@@ -54,6 +54,9 @@ var knownArrayFields = map[string]string{
 
 // knownNumericFields maps DSL field name → SQL column name (integer).
 var knownNumericFields = map[string]string{
+	// id lets a caller resolve one asset by primary key through the same DSL
+	// the rest of the asset queries use, instead of needing a second path.
+	"id":          "id",
 	"port":        "port",
 	"status_code": "status_code",
 	"status":      "status_code",

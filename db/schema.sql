@@ -1574,3 +1574,34 @@ CREATE TABLE IF NOT EXISTS task_schedule_history (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_task_schedule_history_sched ON task_schedule_history(schedule_id, id DESC);
+
+-- =====================================================================
+-- Task intelligence: credentials, leads and sensitive data an agent found
+-- while testing. fingerprint makes a re-discovery idempotent, so the same
+-- finding reported twice updates one row instead of filling the list.
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS task_intelligence (
+    id          BIGSERIAL PRIMARY KEY,
+    task_id     BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    node_id     BIGINT REFERENCES exploration_nodes(id) ON DELETE SET NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('credential','lead','sensitive_data')),
+    title       TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    evidence    TEXT NOT NULL DEFAULT '',
+    -- observed = seen in a response; inferred = deduced. The distinction keeps
+    -- a guess from being reported as a confirmed credential.
+    confidence  TEXT NOT NULL CHECK (confidence IN ('observed','inferred')),
+    status      TEXT NOT NULL,
+    asset_ids   JSONB NOT NULL DEFAULT '[]',
+    worker      TEXT NOT NULL DEFAULT '',
+    fingerprint TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(task_id, kind, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_task_intelligence_task   ON task_intelligence(task_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_task_intelligence_assets ON task_intelligence USING gin(asset_ids);
+
+-- Optional derived credential presentation; the raw intelligence row stays
+-- authoritative, so a failed or stale analysis never loses the original.
+ALTER TABLE task_intelligence ADD COLUMN IF NOT EXISTS credential_analysis JSONB;

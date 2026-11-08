@@ -978,6 +978,14 @@ export interface Settings {
   // safety rules is appended to every agent's system prompt; read per render, so a
   // toggle applies from the next agent round.
   opsec_enabled?: boolean;
+  // Task intelligence (all off by default). Recording is the master switch: with it
+  // off the credential extractor and the traffic binding below are inert.
+  task_intelligence_enabled?: boolean;
+  credential_agent_enabled?: boolean;
+  credential_traffic_binding?: boolean;
+  // Auto title for agent-created tasks and for chat sessions, independent of each other.
+  task_auto_title_enabled?: boolean;
+  chat_auto_title_enabled?: boolean;
   // ---- Vulnerability IM push (channels are a standalone resource, see /api/notify/*; only three global settings live here) ----
   notify_enabled?: boolean; // master push switch, on by default; one-click kill switch for maintenance windows
   notify_public_base_url?: string; // external base URL for vulnerability detail links; empty = messages carry no link
@@ -1481,7 +1489,6 @@ export type TaskCredential = TaskCredentialInput & {
   updated_at: string;
 };
 
-
 export interface AssetInterceptRule {
   id: number;
   enabled: boolean;
@@ -1576,6 +1583,73 @@ export interface ConvTokenSummary {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+}
+
+// ---- Task intelligence (credentials / leads / sensitive data) ----
+export type IntelligenceKind = "credential" | "lead" | "sensitive_data";
+export interface CredentialAccount {
+  label?: string;
+  username?: string;
+  password?: string;
+  token?: string;
+  cookie?: string;
+  endpoint?: string;
+  protocol?: string;
+}
+export interface CredentialTraffic {
+  id: string;
+  url: string;
+  method: string;
+  status: number;
+  side: string;
+  excerpt: string;
+  accounts: number[];
+}
+export interface CredentialAnalysis {
+  state: "queued" | "processing" | "ready" | "error";
+  method?: "rules" | "agent";
+  accounts: CredentialAccount[] | null;
+  traffic: CredentialTraffic[] | null;
+  traffic_state: string;
+  traffic_note?: string;
+  note?: string;
+  error?: string;
+  model?: string;
+  input_tokens: number;
+  output_tokens: number;
+  processed_at?: string;
+}
+export interface CredentialTrafficDetail {
+  reference: CredentialTraffic;
+  req?: string;
+  resp?: string;
+  unavailable: boolean;
+}
+export interface TaskIntelligence {
+  credentials?: CredentialAnalysis;
+  source_session?: string;
+  id: number;
+  task_id: number;
+  node_id?: number;
+  kind: IntelligenceKind;
+  title: string;
+  content: string;
+  evidence: string;
+  confidence: "observed" | "inferred";
+  status: string;
+  asset_ids: number[];
+  worker: string;
+  created_at: string;
+  updated_at: string;
+  inherited: boolean;
+}
+export interface IntelligencePage {
+  credential_agent_enabled: boolean;
+  credential_traffic_binding: boolean;
+  items: TaskIntelligence[];
+  total: number;
+  counts: Record<IntelligenceKind, number>;
+  enabled: boolean;
 }
 
 // ---- Command recording (Bash execution history) ----

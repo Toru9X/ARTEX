@@ -8,6 +8,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ArchiveIcon, ArrowLeftIcon, BrainIcon, CheckIcon, CircleAlertIcon, PauseIcon, PlayIcon } from "lucide-react";
 import { toast } from "sonner";
 
+import { IntelligencePanel } from "@/components/intelligence-panel";
 import { StatusBadge } from "@/components/status-badge";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -56,6 +57,7 @@ const TABS = [
   { value: "overview", label: "Overview" },
   { value: "graph", label: "Exploration graph" },
   { value: "broadcast", label: "Broadcast" },
+  { value: "intelligence", label: "Task intelligence" },
   { value: "findings", label: "Findings" },
   { value: "retests", label: "Retests" },
   { value: "assets", label: "Test assets" },
@@ -174,7 +176,8 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
             <CircleAlertIcon />
             <AlertTitle>Configuration chain quota exhausted</AlertTitle>
             <AlertDescription>
-              {task.llm_failover_reason ?? "All selected configs were judged to be out of quota. Saving the chain resets the failure state."}
+              {task.llm_failover_reason ??
+                "All selected configs were judged to be out of quota. Saving the chain resets the failure state."}
             </AlertDescription>
           </Alert>
         )}
@@ -305,7 +308,9 @@ function TaskDetailInner() {
   if (!task) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
-        <p className="text-muted-foreground">{loaded ? `Task ${id} was deleted, archived, or does not exist` : "Loading…"}</p>
+        <p className="text-muted-foreground">
+          {loaded ? `Task ${id} was deleted, archived, or does not exist` : "Loading…"}
+        </p>
         {loaded && (
           <Button asChild variant="outline">
             <Link href="/function/tasks">
@@ -376,8 +381,9 @@ function TaskDetailInner() {
                 <AlertDialogHeader>
                   <AlertDialogTitle>Archive task #{task.id}?</AlertDialogTitle>
                   <AlertDialogDescription>
-                    The task graph, related records, exclusive assets and traffic, working files, and LLM
-                    history will be compressed into cold storage. Once archiving completes, restore it from the "Archived" tab of the task list.
+                    The task graph, related records, exclusive assets and traffic, working files, and LLM history will
+                    be compressed into cold storage. Once archiving completes, restore it from the "Archived" tab of the
+                    task list.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -430,6 +436,9 @@ function TaskDetailInner() {
         </TabsContent>
         <TabsContent value="broadcast" className="mt-0">
           <BroadcastTab taskId={id} />
+        </TabsContent>
+        <TabsContent value="intelligence" className="mt-0">
+          <IntelligencePanel scope="tasks" scopeId={id} />
         </TabsContent>
         <TabsContent value="findings" className="mt-0">
           <FindingsTab taskId={id} />

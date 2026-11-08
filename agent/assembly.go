@@ -16,6 +16,10 @@ import (
 // UnlockSkill unlocks a named skill's MCPs — hosts call it to rebuild the unlock set
 // from history on a resumed session (design doc C2).
 type DeferredInfo struct {
+	// IntelligenceGuidance is appended to the system prompt while task
+	// intelligence recording is on; empty when it is off.
+	IntelligenceGuidance string
+
 	FindingGuidance string            // derived from the final permitted tools, including DB overrides
 	Deferred        []string          // all MCP tool names (schema withheld)
 	GlobalNames     []string          // MCP names to list in the system-prompt block
@@ -61,6 +65,7 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 		out = ToolResolve(ctx, agentKey, out)
 	}
 	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
+	out, def.IntelligenceGuidance = intelligenceWorkflow(ctx, out)
 	for i, t := range out {
 		out[i] = guardPanic(t)
 	}
