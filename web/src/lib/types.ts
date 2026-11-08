@@ -1264,6 +1264,26 @@ export interface Stats {
   active_task?: Partial<Task>;
 }
 
+// ---- Host / container resource metrics ----
+export interface SystemMetricValue {
+  used_bytes: number;
+  total_bytes: number;
+  percent: number;
+}
+
+// supported=false means this server build cannot read the metrics (every OS
+// but Linux); the dashboard hides the widget rather than drawing empty bars.
+export interface SystemMetrics {
+  scope: "container" | "unsupported" | string;
+  supported: boolean;
+  timestamp: string;
+  container_metrics: boolean;
+  cpu: SystemMetricValue;
+  memory: SystemMetricValue;
+  disk: SystemMetricValue;
+  data_disk: SystemMetricValue;
+}
+
 // ---- Intercept Rules ----
 export type InterceptAction = "allow" | "deny" | "ask";
 export type InterceptMatchTarget = "tool_name" | "tool_input";

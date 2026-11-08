@@ -81,6 +81,7 @@ import type {
   SSProject,
   SSTask,
   Stats,
+  SystemMetrics,
   Task,
   TaskArchive,
   TaskArchivePage,
@@ -374,6 +375,9 @@ export const api = {
   setActive: (id: string) => post<{ active: string }>("/active", { id }),
   // ---- stats ----
   stats: (task?: string) => get<Stats>(`/stats${tq(task)}`),
+  // Host/container CPU, memory and disk. CPU is a rate measured against the
+  // previous call, so the first reading after a restart is always 0%.
+  systemMetrics: () => get<SystemMetrics>("/system/metrics"),
   // Asset test coverage (rough estimate, for reference): share of in-scope assets touched by facts + total/tested per type.
   taskCoverage: (id: string) =>
     get<{
