@@ -21,6 +21,9 @@ export interface Task {
   status: TaskStatus;
   created_at: string;
   created_unix?: number; // created_at as unix seconds (run-duration calc)
+  // run_seconds is real active runtime from the server's execution segments:
+  // it excludes time the task spent paused or waiting in the concurrency queue.
+  run_seconds?: number;
   completed_at?: string; // RFC3339 finish time (done/failed); "" if unfinished
   completed_unix?: number; // completed_at as unix seconds (0/undef if unfinished)
   last_activity_unix?: number; // unix seconds of the last activity (0/undef if none)
@@ -950,6 +953,10 @@ export interface Settings {
   // Auto-resume cadence for tasks paused by a proxy outage.
   proxy_reconnect_max_attempts?: number;
   proxy_reconnect_interval_seconds?: number;
+  // Worker pools bind groups of worker lanes to specific LLM profiles. Empty =
+  // the flat `workers` count with no pinning. Applies to runs started after the
+  // change: a run's lane plan is fixed for its lifetime.
+  worker_pools?: WorkerPool[];
   python_interpreter?: string; // python interpreter path for custom script tools (empty = detect at runtime)
   workers?: number; // concurrent worker agent count (default 3); applies to tasks started afterwards
   // Task concurrency cap: max simultaneously "running" tasks. Off = unlimited; on, new tasks beyond the limit queue and start automatically when a slot frees up.
@@ -1360,6 +1367,13 @@ export interface ProxyPoolEntry {
   last_checked_at?: string;
   consecutive_failures: number;
   health: "healthy" | "unhealthy-cooling" | "disabled" | string;
+}
+
+export interface WorkerPool {
+  // profile_id is a string for the same reason the rest of the LLM API uses
+  // strings: a profile id can exceed JavaScript's safe integer range.
+  profile_id: string;
+  workers: number;
 }
 
 export interface ProxySwitchLog {

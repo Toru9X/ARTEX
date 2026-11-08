@@ -1495,3 +1495,16 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pause_reason TEXT NOT NULL DEFAULT ''
 -- credentials-handling reminders or handover context.
 ALTER TABLE tasks           ADD COLUMN IF NOT EXISTS remark TEXT NOT NULL DEFAULT '';
 ALTER TABLE task_templates  ADD COLUMN IF NOT EXISTS remark TEXT NOT NULL DEFAULT '';
+
+-- Real active runtime, in execution segments. active_run_seconds accumulates
+-- finished segments; run_segment_started_at marks the open one (NULL = none).
+-- Displayed duration is active_run_seconds plus the open segment, so a task
+-- parked by a pause or by the concurrency queue stops accruing time.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_run_seconds     BIGINT      NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS run_segment_started_at TIMESTAMPTZ;
+
+-- Per-task worker-count override (0 = follow the global setting) and the same
+-- override on a template. Capped at db.MaxTaskWorkerCount in code; the column
+-- stays unconstrained so a direct edit cannot make a row unreadable.
+ALTER TABLE tasks          ADD COLUMN IF NOT EXISTS worker_count INT NOT NULL DEFAULT 0;
+ALTER TABLE task_templates ADD COLUMN IF NOT EXISTS worker_count INT NOT NULL DEFAULT 0;

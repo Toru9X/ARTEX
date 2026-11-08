@@ -187,10 +187,12 @@ function fmtDuration(sec: number): string {
   return `${s}s`;
 }
 
-// taskDuration is the task's run duration in seconds: created → now while running,
-// created → completion for a finished task, else created → last activity. 0 when it
-// never ran (no activity yet).
+// taskDuration is the task's run duration in seconds. The server reports real
+// active runtime (execution segments, excluding paused and queued time); prefer
+// it and fall back to the wall-clock estimate only for a task that predates the
+// segment columns, where run_seconds is absent.
 function taskDuration(task: Task, nowSec: number): number {
+  if (task.run_seconds !== undefined) return task.run_seconds;
   const start = task.created_unix ?? 0;
   if (!start) return 0;
   const end =

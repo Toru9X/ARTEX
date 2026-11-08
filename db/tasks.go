@@ -25,11 +25,18 @@ type Task struct {
 	// PauseReason names who paused the task; see schema.sql. Empty when running.
 	PauseReason string `json:"pause_reason,omitempty"`
 	// Remark is a free-form operator note; see MaxTaskRemarkRunes.
-	Remark       string     `json:"remark,omitempty"`
-	Queued       bool       `json:"queued"`
-	QueuedAt     *time.Time `json:"queued_at,omitempty"`
-	QueueMode    string     `json:"queue_mode,omitempty"`
-	LLMProfileID *int64     `json:"llm_profile_id,omitempty"`
+	Remark string `json:"remark,omitempty"`
+	// WorkerCount overrides the global worker count for this task; 0 = follow
+	// the global setting. See MaxTaskWorkerCount.
+	WorkerCount int `json:"worker_count,omitempty"`
+	// ActiveRunSeconds is finished execution time; RunSegmentStartedAt marks an
+	// open segment (nil = none). See schema.sql.
+	ActiveRunSeconds    int64      `json:"active_run_seconds"`
+	RunSegmentStartedAt *time.Time `json:"run_segment_started_at,omitempty"`
+	Queued              bool       `json:"queued"`
+	QueuedAt            *time.Time `json:"queued_at,omitempty"`
+	QueueMode           string     `json:"queue_mode,omitempty"`
+	LLMProfileID        *int64     `json:"llm_profile_id,omitempty"`
 	// Task-level ordered LLM chain. LLMProfileID remains the compatibility alias
 	// for ActiveLLMProfileID while older API clients still send one profile id.
 	LLMProfileIDs      []int64 `json:"llm_profile_ids,omitempty"`
@@ -374,11 +381,11 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 
 const taskCols = `id, COALESCE(name,''), category_id,
 COALESCE((SELECT category.name FROM task_categories category WHERE category.id=tasks.category_id),''),
-COALESCE(remark,''), description, goal, exploration_id, status, paused, COALESCE(pause_reason,''), queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(plan_quiet_mode,true), COALESCE(coverage_enabled,true), COALESCE(llm_rotate,false), first_run_at, deadline_at`
+COALESCE(remark,''), description, goal, exploration_id, status, paused, COALESCE(pause_reason,''), queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(plan_quiet_mode,true), COALESCE(coverage_enabled,true), COALESCE(llm_rotate,false), first_run_at, deadline_at, COALESCE(active_run_seconds,0), run_segment_started_at, COALESCE(worker_count,0)`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Remark, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.PauseReason, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.PlanQuietMode, &t.CoverageEnabled, &t.LLMRotate, &t.FirstRunAt, &t.DeadlineAt); err != nil {
+	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Remark, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.PauseReason, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.PlanQuietMode, &t.CoverageEnabled, &t.LLMRotate, &t.FirstRunAt, &t.DeadlineAt, &t.ActiveRunSeconds, &t.RunSegmentStartedAt, &t.WorkerCount); err != nil {
 		return nil, err
 	}
 	t.Pinned = t.PinnedAt != nil
@@ -421,6 +428,11 @@ ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC NULLS LAST, id DESC`)
 // TaskPatch updates task list metadata without changing execution state.
 // MaxTaskRemarkRunes is the shared limit for task and template remarks.
 const MaxTaskRemarkRunes = 2000
+
+// MaxTaskWorkerCount caps a per-task worker override. A direct database edit
+// can bypass API validation, so the engine clamps to this before starting
+// goroutines — an absurd value would otherwise fork that many worker loops.
+const MaxTaskWorkerCount = 50
 
 type TaskPatch struct {
 	Name   *string
@@ -483,6 +495,10 @@ func (d *DB) Enqueue(id int64, mode string) error {
 	_, err := d.Exec(`UPDATE tasks
 SET queued=true,
     queued_at=CASE WHEN queued THEN COALESCE(queued_at, now()) ELSE now() END,
+    -- Parked in the queue is not running: close the segment here too, or the
+    -- wait would be counted as execution time.
+    active_run_seconds=active_run_seconds + CASE WHEN run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END,
+    run_segment_started_at=NULL,
     queue_mode=CASE
         WHEN queue_mode='bootstrap' OR $2='bootstrap' THEN 'bootstrap'
         ELSE 'resume'
@@ -522,7 +538,10 @@ UPDATE tasks
        -- A terminal task is never auto-resumed, so drop its proxy-pause
        -- eligibility along with the status.
        pause_reason = CASE WHEN $1 IN ('done','failed','timeout') THEN '' ELSE pause_reason END,
-       completed_at = CASE WHEN $1 IN ('done','failed','timeout') THEN COALESCE(completed_at, now()) ELSE NULL END
+       completed_at = CASE WHEN $1 IN ('done','failed','timeout') THEN COALESCE(completed_at, now()) ELSE NULL END,
+       -- A terminal task stops the clock: fold the open segment in and close it.
+       active_run_seconds = active_run_seconds + CASE WHEN $1 IN ('done','failed','timeout') AND run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END,
+       run_segment_started_at = CASE WHEN $1 IN ('done','failed','timeout') THEN NULL ELSE run_segment_started_at END
  WHERE id = $2`, status, id)
 	return err
 }
@@ -536,13 +555,68 @@ func (d *DB) SetTerminalStatusGuarded(id int64, status string) (won bool, err er
 UPDATE tasks
    SET status = $1,
        pause_reason = '',
-       completed_at = COALESCE(completed_at, now())
+       completed_at = COALESCE(completed_at, now()),
+       active_run_seconds = active_run_seconds + CASE WHEN run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END,
+       run_segment_started_at = NULL
  WHERE id = $2 AND status NOT IN ('done','failed','timeout')`, status, id)
 	if err != nil {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// StartTaskRunSegment opens the active execution segment. It is idempotent and
+// refuses to start while the task is paused or waiting in the concurrency
+// queue — a parked task must not accrue runtime.
+func (d *DB) StartTaskRunSegment(id int64) (int64, *time.Time, error) {
+	var active int64
+	var started *time.Time
+	err := d.QueryRow(`UPDATE tasks
+SET run_segment_started_at=COALESCE(run_segment_started_at, now())
+WHERE id=$1 AND deleted_at IS NULL AND status IN ('created','running') AND NOT paused AND NOT queued
+RETURNING active_run_seconds, run_segment_started_at`, id).Scan(&active, &started)
+	if err == sql.ErrNoRows {
+		// Not eligible: report the stored values rather than zeroes, so a
+		// caller mirroring them does not reset the live clock.
+		err = d.QueryRow(`SELECT active_run_seconds, run_segment_started_at FROM tasks WHERE id=$1`, id).Scan(&active, &started)
+		if err == sql.ErrNoRows {
+			return 0, nil, nil
+		}
+	}
+	return active, started, err
+}
+
+// FinalizeTaskRunSegment folds the open segment into active_run_seconds. A NULL
+// segment makes repeated pause/terminal calls a safe no-op.
+func (d *DB) FinalizeTaskRunSegment(id int64) (int64, *time.Time, error) {
+	var active int64
+	var started *time.Time
+	err := d.QueryRow(`UPDATE tasks
+SET active_run_seconds=active_run_seconds + GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint),
+    run_segment_started_at=NULL
+WHERE id=$1 AND run_segment_started_at IS NOT NULL
+RETURNING active_run_seconds, run_segment_started_at`, id).Scan(&active, &started)
+	if err == sql.ErrNoRows {
+		err = d.QueryRow(`SELECT active_run_seconds, run_segment_started_at FROM tasks WHERE id=$1`, id).Scan(&active, &started)
+		if err == sql.ErrNoRows {
+			return 0, nil, nil
+		}
+	}
+	return active, started, err
+}
+
+// ClearOpenTaskRunSegments drops segments that were live when the process
+// stopped. Their wall time is unknowable after a crash or a deploy, so startup
+// deliberately begins with no live segment and the engine opens a fresh one
+// only when it actually resumes work. Counting that gap would silently inflate
+// every task's runtime by the length of the outage.
+func (d *DB) ClearOpenTaskRunSegments() (int64, error) {
+	res, err := d.Exec(`UPDATE tasks SET run_segment_started_at=NULL WHERE run_segment_started_at IS NOT NULL`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // StampFirstRun records a task's first-real-run moment and computes its absolute

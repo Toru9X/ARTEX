@@ -207,6 +207,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// before a concurrent user pause observes the new paused state.
 	m.SetTaskControlMutex(&s.concMu)
 	s.engine.SetProxyFailureHandler(s.handleProxyFailure)
+	s.engine.SetWorkerResolver(s.workerForTaskSlot)
 	if m.traffic != nil {
 		m.traffic.SetUpstreamFailureHandler(s.handleProxyTrafficFailure)
 	}
@@ -3518,6 +3519,9 @@ func (s *Server) settingsPayload() map[string]any {
 		"proxy_health_check_interval_seconds": proxyIntSetting(s.m.pg, settingProxyHealthInterval, defaultProxyHealthInterval),
 		"proxy_reconnect_max_attempts":        func() int { n, _ := s.proxyReconnectConfig(); return n }(),
 		"proxy_reconnect_interval_seconds":    func() int { _, d := s.proxyReconnectConfig(); return int(d / time.Second) }(),
+		// Worker pools bind groups of worker lanes to specific LLM profiles.
+		// Empty = the flat "workers" count with no pinning.
+		"worker_pools": s.m.WorkerPools(),
 		// Vulnerability IM push global settings. Channels are standalone resources managed via /api/notify/*;
 		// only the three items that "apply to all channels" live here.
 		"notify_enabled":             s.m.pg.GetBool(settingNotifyEnabled, true),
@@ -3605,6 +3609,8 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		ProxyHealthInterval    *int    `json:"proxy_health_check_interval_seconds"`
 		ProxyReconnectMax      *int    `json:"proxy_reconnect_max_attempts"`
 		ProxyReconnectInterval *int    `json:"proxy_reconnect_interval_seconds"`
+		// WorkerPools replaces the whole pool list; an empty array clears it.
+		WorkerPools *[]WorkerPool `json:"worker_pools"`
 		// Vulnerability IM push global settings. The delivery engine re-reads all three every round, so changes
 		// take effect immediately with no agent rebuild or restart.
 		NotifyEnabled    *bool   `json:"notify_enabled"`
@@ -3684,6 +3690,14 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		select {
 		case s.proxyPoolWake <- struct{}{}:
 		default:
+		}
+	}
+	if req.WorkerPools != nil {
+		// Applies to runs started afterwards: the slot plan is fixed for the
+		// life of a run so an intent is always re-executed on its own lane.
+		if err := s.m.SetWorkerPools(*req.WorkerPools); err != nil {
+			writeErr(w, 400, err.Error())
+			return
 		}
 	}
 	if req.EgressProbeURL != nil {

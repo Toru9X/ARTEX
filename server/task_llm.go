@@ -27,7 +27,10 @@ type taskAgentBundle struct {
 	mainRuntime    *taskLLMRuntime
 	pl             *agent.Planner
 	wk             *agent.Worker
-	main           *agent.MainAgent
+	// pinnedWorkers caches one Worker per pinned LLM profile, so a worker-pool
+	// lane keeps its own transcript and compaction window across runs.
+	pinnedWorkers map[int64]*agent.Worker
+	main          *agent.MainAgent
 }
 
 type llmAuditProfile struct {
@@ -52,6 +55,9 @@ type taskLLMRuntime struct {
 	s        *Server
 	taskID   string
 	agentKey string
+	// pinProfileID pins this runtime to one LLM profile (a worker-pool lane).
+	// nil = resolve normally through binding, chain and global.
+	pinProfileID *int64
 }
 
 type taskLLMError struct {
@@ -182,6 +188,18 @@ func (r *taskLLMRuntime) current() (taskLLMSelection, error) {
 // the chain must still be in a ready state (an exhausted chain with no active
 // head stays exhausted) and the pinned id must belong to the task's chain.
 func (r *taskLLMRuntime) currentFor(ctx context.Context) (taskLLMSelection, error) {
+	if r.pinProfileID != nil {
+		// A worker-pool lane resolves its own profile before bindings and the
+		// task chain. poolForBinding keeps it inside llmpool's circuit breaker:
+		// without that wrapper a failing pinned profile would stall the lane
+		// instead of failing over.
+		prov, cfg, ok := r.s.providerForProfile(*r.pinProfileID)
+		if !ok {
+			return taskLLMSelection{}, fmt.Errorf("LLM profile #%d is missing or invalid", *r.pinProfileID)
+		}
+		t, _ := r.s.m.Task(r.taskID)
+		return taskLLMSelection{task: t, provider: r.s.poolForBinding(*r.pinProfileID, prov, cfg), retry: cfg.Retry}, nil
+	}
 	taskNum, err := parseTaskID(r.taskID)
 	if err != nil {
 		return taskLLMSelection{}, err
@@ -626,6 +644,63 @@ func (s *Server) agentBindingProvider(agentKey string) (llm.Provider, agent.Conf
 		return nil, agent.Config{}, false
 	}
 	return s.poolForBinding(*id, prov, cfg), cfg, true
+}
+
+// workerForTaskSlot builds the Worker for a lane pinned to an LLM profile.
+//
+// Scope rule: a task with its own LLM chain owns its routing, so a slot pin is
+// honoured only when the pinned profile belongs to that chain. Otherwise the
+// chain (and its rotation and failover) decides, and this returns an error so
+// the caller falls back to the task's normal bundle.
+func (s *Server) workerForTaskSlot(t *Task, slot WorkerSlot) (*agent.Worker, error) {
+	if slot.ProfileID <= 0 {
+		return nil, errors.New("worker slot is not pinned")
+	}
+	if t != nil {
+		if chain := t.llmStateSnapshot().ProfileIDs; len(chain) > 0 {
+			inChain := false
+			for _, id := range chain {
+				if id == slot.ProfileID {
+					inChain = true
+					break
+				}
+			}
+			if !inChain {
+				return nil, fmt.Errorf("LLM profile #%d is not in the task's chain", slot.ProfileID)
+			}
+		}
+	}
+	_, cfg, ok := s.providerForProfile(slot.ProfileID)
+	if !ok {
+		return nil, fmt.Errorf("LLM profile #%d is missing or invalid", slot.ProfileID)
+	}
+	s.taskAgentMu.Lock()
+	defer s.taskAgentMu.Unlock()
+	bundle := s.taskAgents[t.ID]
+	if bundle == nil {
+		return nil, fmt.Errorf("task %s has no agent bundle yet", t.ID)
+	}
+	if bundle.pinnedWorkers == nil {
+		bundle.pinnedWorkers = make(map[int64]*agent.Worker)
+	}
+	if worker := bundle.pinnedWorkers[slot.ProfileID]; worker != nil {
+		return worker, nil
+	}
+	id := slot.ProfileID
+	runtime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "worker", pinProfileID: &id}
+	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
+	worker := agent.NewWorker(runtime, cfg.Model, s.m.dir, tx, runtime.CompactionWindow(), s.agentMaxTurns("worker"))
+	worker.SetFindingRecorder(s.evidenceStore())
+	worker.SetCompactionWindowResolver(runtime.CompactionWindow)
+	worker.SetNonStreaming(runtime.nonStreaming)
+	worker.SetMaxTokens(runtime.maxTokens)
+	worker.SetNoaEnabled(s.m.NoaCompactionEnabled)
+	worker.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
+	worker.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	worker.SetWebSearch(s.webSearchFor("worker"))
+	worker.SetConstraintInject(s.constraintInjectWorker)
+	bundle.pinnedWorkers[id] = worker
+	return worker, nil
 }
 
 // globalProvider returns the process-wide provider (persisted active profile or

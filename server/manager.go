@@ -45,6 +45,13 @@ type Task struct {
 	PauseReason string `json:"pause_reason,omitempty"`
 	// Remark is a free-form operator note; see db.MaxTaskRemarkRunes.
 	Remark string `json:"remark,omitempty"`
+	// ActiveRunSeconds / RunSegmentStartedAt are the execution-segment clock;
+	// see db/schema.sql. RunSegmentStartedAt is unix seconds, 0 = no segment.
+	ActiveRunSeconds    int64 `json:"-"`
+	RunSegmentStartedAt int64 `json:"-"`
+	// WorkerCount is a per-task override of the global worker count; 0 follows
+	// the global setting (and the worker pools, when configured).
+	WorkerCount int `json:"worker_count,omitempty"`
 	// Reconnect* is the in-memory auto-resume state for a paused_by_proxy task.
 	// Not persisted: an outage does not survive a restart, and on reload the
 	// task simply stays paused until the supervisor adopts it again.
@@ -106,7 +113,9 @@ type taskLifecycleState struct {
 	// supervisor resumes only the tasks it paused itself.
 	PauseReason string
 	// Remark is a free-form operator note; see db.MaxTaskRemarkRunes.
-	Remark string
+	Remark              string
+	ActiveRunSeconds    int64
+	RunSegmentStartedAt int64
 	// Reconnect* track the auto-resume attempt for a paused_by_proxy task.
 	// Generation is bumped on every new pause so a late success from a previous
 	// outage cannot resume a task that has since been paused again.
@@ -149,6 +158,8 @@ func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 		Paused:              t.Paused,
 		PauseReason:         t.PauseReason,
 		Remark:              t.Remark,
+		ActiveRunSeconds:    t.ActiveRunSeconds,
+		RunSegmentStartedAt: t.RunSegmentStartedAt,
 		ReconnectAttempt:    t.ReconnectAttempt,
 		ReconnectMax:        t.ReconnectMax,
 		ReconnectNextAt:     t.ReconnectNextAt,
@@ -181,6 +192,8 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.Paused = state.Paused
 	t.PauseReason = state.PauseReason
 	t.Remark = state.Remark
+	t.ActiveRunSeconds = state.ActiveRunSeconds
+	t.RunSegmentStartedAt = state.RunSegmentStartedAt
 	t.ReconnectAttempt = state.ReconnectAttempt
 	t.ReconnectMax = state.ReconnectMax
 	t.ReconnectNextAt = state.ReconnectNextAt
@@ -340,6 +353,9 @@ const (
 	// only routes the search backend) and the per-profile LLM proxy.
 	settingGlobalProxy = "global_proxy"
 	settingWorkers     = "workers"
+	// worker_pools binds groups of worker slots to specific LLM profiles.
+	// Empty = the flat settingWorkers count with no profile pinning.
+	settingWorkerPools = "worker_pools"
 	settingLLMRecord   = "llm_record"
 	// LLM failover (round-robin). Off by default — when on, an agent on the "globally
 	// active profile" switches to the next profile automatically when the current one is
@@ -531,6 +547,11 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	// off, ProxyAddr hands it to agents directly (bash env / WebFetch).
 	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
 		m.globalProxy = strings.TrimSpace(v)
+	}
+	// Segments left open by a crash or deploy have unknowable wall time; drop
+	// them so the outage is not counted as execution.
+	if _, err := pg.ClearOpenTaskRunSegments(); err != nil {
+		log.Printf("[runtime] clear open run segments: %v", err)
 	}
 	m.initProxyPool()
 	if m.traffic != nil {
@@ -1002,7 +1023,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		Name:       pt.Name,
 		CategoryID: cloneInt64Ptr(pt.CategoryID), CategoryName: pt.CategoryName,
 		PinnedAt:    unixOrZero(pt.PinnedAt),
-		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, PauseReason: pt.PauseReason, Remark: pt.Remark, Queued: pt.Queued,
+		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, PauseReason: pt.PauseReason, Remark: pt.Remark, ActiveRunSeconds: pt.ActiveRunSeconds, RunSegmentStartedAt: unixOrZero(pt.RunSegmentStartedAt), WorkerCount: pt.WorkerCount, Queued: pt.Queued,
 		QueuedAt: unixNanoOrZero(pt.QueuedAt), QueueMode: pt.QueueMode,
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,
 		LLMProfileID:  pt.LLMProfileID,
@@ -1423,7 +1444,9 @@ func (m *Manager) ApplyTaskPause(id string) error {
 	}
 	var mode string
 	err = m.pg.QueryRow(`UPDATE tasks
-		SET paused=true, pause_reason='paused_by_user', queued=false, queued_at=NULL, paused_at=now()
+		SET paused=true, pause_reason='paused_by_user', queued=false, queued_at=NULL, paused_at=now(),
+		    active_run_seconds=active_run_seconds + CASE WHEN run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END,
+		    run_segment_started_at=NULL
 		WHERE id=$1 AND deleted_at IS NULL AND paused=false
 		  AND status NOT IN ('done','failed','timeout')
 		RETURNING COALESCE(queue_mode,'')`, n).Scan(&mode)
@@ -1445,6 +1468,197 @@ func (m *Manager) ApplyTaskPause(id string) error {
 	}
 	m.mu.Unlock()
 	return nil
+}
+
+// StartTaskRunSegment opens the execution segment once the engine has admitted
+// a task and is about to run planner/worker work.
+func (m *Manager) StartTaskRunSegment(id string) error {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	m.mu.RLock()
+	if t := m.tasks[id]; t != nil && t.lifecycleSnapshot().RunSegmentStartedAt > 0 {
+		m.mu.RUnlock()
+		return nil // already open; starting again would reset the clock
+	}
+	m.mu.RUnlock()
+	active, started, err := m.pg.StartTaskRunSegment(n)
+	if err != nil {
+		return err
+	}
+	if started != nil {
+		m.mirrorTaskRuntime(id, active, started)
+	}
+	return nil
+}
+
+// FinalizeTaskRunSegment is idempotent, so a pause or terminal path that races
+// a late engine cancellation cannot double-count the segment.
+func (m *Manager) FinalizeTaskRunSegment(id string) error {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	active, started, err := m.pg.FinalizeTaskRunSegment(n)
+	if err != nil {
+		return err
+	}
+	m.mirrorTaskRuntime(id, active, started)
+	return nil
+}
+
+func (m *Manager) mirrorTaskRuntime(id string, active int64, started *time.Time) {
+	m.mu.RLock()
+	t := m.tasks[id]
+	m.mu.RUnlock()
+	if t == nil {
+		return
+	}
+	t.updateLifecycle(func(state *taskLifecycleState) {
+		state.ActiveRunSeconds = active
+		state.RunSegmentStartedAt = unixOrZero(started)
+	})
+}
+
+// WorkerPool binds a number of worker slots to one LLM profile. Profile IDs are
+// encoded as JSON strings to match the frontend LLMProfile API.
+type WorkerPool struct {
+	ProfileID int64 `json:"profile_id,string"`
+	Workers   int   `json:"workers"`
+}
+
+// UnmarshalJSON accepts profile_id as a number or a numeric string: the web
+// client sends strings to avoid JavaScript's 53-bit integer limit, while saved
+// payloads and tests use numbers.
+func (p *WorkerPool) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ProfileID json.RawMessage `json:"profile_id"`
+		Workers   int             `json:"workers"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var id int64
+	if err := json.Unmarshal(raw.ProfileID, &id); err != nil {
+		var text string
+		if err := json.Unmarshal(raw.ProfileID, &text); err != nil {
+			return fmt.Errorf("profile_id must be an integer or a numeric string")
+		}
+		parsed, err := strconv.ParseInt(strings.TrimSpace(text), 10, 64)
+		if err != nil {
+			return fmt.Errorf("profile_id must be an integer or a numeric string")
+		}
+		id = parsed
+	}
+	p.ProfileID, p.Workers = id, raw.Workers
+	return nil
+}
+
+// WorkerSlot is the concrete routing plan for one worker loop of one task run.
+type WorkerSlot struct {
+	Name      string
+	ProfileID int64 // zero means no pin: resolve through the task's normal chain
+}
+
+// ValidateWorkerPools checks pool shape without a database. Duplicate profile
+// IDs are rejected so each profile has one unambiguous slot group in the saved
+// order — two groups for the same profile would make the plan ambiguous.
+func ValidateWorkerPools(pools []WorkerPool) error {
+	if len(pools) == 0 {
+		return nil
+	}
+	seen := make(map[int64]bool, len(pools))
+	total := 0
+	for _, pool := range pools {
+		if pool.ProfileID <= 0 {
+			return fmt.Errorf("worker_pools: profile_id must be greater than 0")
+		}
+		if pool.Workers <= 0 {
+			return fmt.Errorf("worker_pools: workers must be greater than 0")
+		}
+		if seen[pool.ProfileID] {
+			return fmt.Errorf("worker_pools: duplicate profile_id %d", pool.ProfileID)
+		}
+		seen[pool.ProfileID] = true
+		// Compare before adding so a huge Workers value cannot overflow total.
+		if total > pgdb.MaxTaskWorkerCount-pool.Workers {
+			return fmt.Errorf("worker_pools: total workers must be between 1 and %d", pgdb.MaxTaskWorkerCount)
+		}
+		total += pool.Workers
+	}
+	if total < 1 || total > pgdb.MaxTaskWorkerCount {
+		return fmt.Errorf("worker_pools: total workers must be between 1 and %d", pgdb.MaxTaskWorkerCount)
+	}
+	return nil
+}
+
+// ExpandWorkerSlots expands pools in their saved order. With no pools the
+// legacy flat count is used and no slot carries a profile pin, so an
+// installation that never configures pools behaves exactly as before.
+func ExpandWorkerSlots(pools []WorkerPool, legacy int) ([]WorkerSlot, error) {
+	if err := ValidateWorkerPools(pools); err != nil {
+		return nil, err
+	}
+	if len(pools) == 0 {
+		if legacy <= 0 {
+			legacy = defaultWorkers
+		}
+		slots := make([]WorkerSlot, legacy)
+		for i := range slots {
+			slots[i] = WorkerSlot{Name: fmt.Sprintf("work#%d", i+1)}
+		}
+		return slots, nil
+	}
+	slots := make([]WorkerSlot, 0)
+	for _, pool := range pools {
+		for i := 0; i < pool.Workers; i++ {
+			slots = append(slots, WorkerSlot{ProfileID: pool.ProfileID})
+		}
+	}
+	// Names are assigned after expansion so they stay work#1..work#N in the
+	// saved order; the intent owner recorded in the graph is this name.
+	for i := range slots {
+		slots[i].Name = fmt.Sprintf("work#%d", i+1)
+	}
+	return slots, nil
+}
+
+// WorkerPools reads the persisted pool configuration; an unreadable or invalid
+// value yields no pools, which falls back to the flat worker count.
+func (m *Manager) WorkerPools() []WorkerPool {
+	raw, ok, err := m.pg.GetSetting(settingWorkerPools)
+	if err != nil || !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var pools []WorkerPool
+	if json.Unmarshal([]byte(raw), &pools) != nil {
+		return nil
+	}
+	if ValidateWorkerPools(pools) != nil {
+		return nil
+	}
+	return pools
+}
+
+// SetWorkerPools validates and persists the pool configuration. An empty list
+// clears it and restores the flat worker count.
+func (m *Manager) SetWorkerPools(pools []WorkerPool) error {
+	if len(pools) == 0 {
+		return m.pg.SetSetting(settingWorkerPools, "")
+	}
+	if err := ValidateWorkerPools(pools); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(pools)
+	if err != nil {
+		return err
+	}
+	return m.pg.SetSetting(settingWorkerPools, string(raw))
 }
 
 // SetTaskControlMutex attaches the Server's task-control mutex; see controlMu.
@@ -1475,7 +1689,9 @@ func (m *Manager) ApplyProxyPauseWithCallback(id string, callback func()) (trans
 	}
 	var mode string
 	err = m.pg.QueryRow(`UPDATE tasks
-		SET paused=true, pause_reason='paused_by_proxy', queued=false, queued_at=NULL, paused_at=now()
+		SET paused=true, pause_reason='paused_by_proxy', queued=false, queued_at=NULL, paused_at=now(),
+		    active_run_seconds=active_run_seconds + CASE WHEN run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END,
+		    run_segment_started_at=NULL
 		WHERE id=$1 AND deleted_at IS NULL AND paused=false
 		  AND status NOT IN ('done','failed','timeout')
 		RETURNING COALESCE(queue_mode,'')`, n).Scan(&mode)

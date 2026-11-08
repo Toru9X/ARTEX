@@ -30,19 +30,22 @@ func rawString(raw json.RawMessage) string {
 
 // ---- Task (frontend "Task") ---- created_at as RFC3339, plus a derived status.
 type TaskDTO struct {
-	ID                 string             `json:"id"`
-	ExplorationID      int64              `json:"exploration_id"`
-	Name               string             `json:"name"`             // optional task name; empty = unnamed
-	Remark             string             `json:"remark,omitempty"` // free-form operator note; empty = none
-	CategoryID         *int64             `json:"category_id,omitempty"`
-	CategoryName       string             `json:"category_name,omitempty"`
-	Pinned             bool               `json:"pinned"`
-	PinnedAt           string             `json:"pinned_at,omitempty"`
-	Description        string             `json:"description"`
-	Goal               string             `json:"goal"`
-	Status             string             `json:"status"` // created | running | paused | done | failed
-	CreatedAt          string             `json:"created_at"`
-	CreatedUnix        int64              `json:"created_unix"`       // created_at as unix seconds (for run-duration calc)
+	ID            string `json:"id"`
+	ExplorationID int64  `json:"exploration_id"`
+	Name          string `json:"name"`             // optional task name; empty = unnamed
+	Remark        string `json:"remark,omitempty"` // free-form operator note; empty = none
+	CategoryID    *int64 `json:"category_id,omitempty"`
+	CategoryName  string `json:"category_name,omitempty"`
+	Pinned        bool   `json:"pinned"`
+	PinnedAt      string `json:"pinned_at,omitempty"`
+	Description   string `json:"description"`
+	Goal          string `json:"goal"`
+	Status        string `json:"status"` // created | running | paused | done | failed
+	CreatedAt     string `json:"created_at"`
+	CreatedUnix   int64  `json:"created_unix"` // created_at as unix seconds (for run-duration calc)
+	// RunSeconds is real active runtime: finished execution segments plus the
+	// open one. Unlike now-created_at it excludes paused and queued time.
+	RunSeconds         int64              `json:"run_seconds"`
 	CompletedAt        string             `json:"completed_at"`       // RFC3339 finish time (done/failed); "" if unfinished
 	CompletedUnix      int64              `json:"completed_unix"`     // completed_at as unix seconds (0 if unfinished)
 	LastActivity       int64              `json:"last_activity_unix"` // unix seconds of the last activity (0 if none)
@@ -106,6 +109,7 @@ func tokenTotalDTO(u db.TokenUsage) TokenTotalDTO {
 
 func taskDTO(t *Task, status string) TaskDTO {
 	lifecycle := t.lifecycleSnapshot()
+	runSeconds := taskRunSeconds(lifecycle.ActiveRunSeconds, lifecycle.RunSegmentStartedAt, time.Now().Unix(), status, lifecycle.Paused, lifecycle.Queued)
 	llmState := t.llmStateSnapshot()
 	sourceIDs := make([]string, 0, len(lifecycle.SourceTaskIDs))
 	for _, id := range lifecycle.SourceTaskIDs {
@@ -117,6 +121,7 @@ func taskDTO(t *Task, status string) TaskDTO {
 		ExplorationID:      t.ExpID,
 		Name:               lifecycle.Name,
 		Remark:             lifecycle.Remark,
+		RunSeconds:         runSeconds,
 		CategoryID:         lifecycle.CategoryID,
 		CategoryName:       lifecycle.CategoryName,
 		Pinned:             lifecycle.PinnedAt > 0,

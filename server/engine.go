@@ -158,6 +158,13 @@ type Engine struct {
 	// proxyFailure reports a suspected global-proxy outage for a task; the
 	// Server installs it, so it stays nil for a bare Engine in tests.
 	proxyFailure func(taskID string, err error)
+	// workerResolve builds the Worker for a slot pinned to an LLM profile. nil
+	// (or an unpinned slot) falls back to the task's normal agent bundle.
+	workerResolve func(t *Task, slot WorkerSlot) (*agent.Worker, error)
+	// slotPlans maps taskID -> slot name -> profile ID for the current run. It
+	// is immutable for the life of a run, so an intent claimed by work#2 is
+	// always re-executed on work#2's profile.
+	slotPlans sync.Map
 }
 
 type taskRuntime struct {
@@ -292,6 +299,9 @@ func (e *Engine) StopTask(taskID string) {
 	e.stamped.Delete(taskID)
 	e.inflight.Delete(taskID)
 	e.coordStarted.Delete(taskID)
+	// Without this the map grows by one entry per deleted task for the life of
+	// the process.
+	e.slotPlans.Delete(taskID)
 	e.deleteMu.Lock()
 	e.deleting.Delete(taskID)
 	e.deleteMu.Unlock()
@@ -709,6 +719,33 @@ func (e *Engine) SetReadiness(fn func() bool) { e.readiness = fn }
 
 func (e *Engine) SetProxyFailureHandler(fn func(string, error)) { e.proxyFailure = fn }
 
+func (e *Engine) SetWorkerResolver(fn func(t *Task, slot WorkerSlot) (*agent.Worker, error)) {
+	e.workerResolve = fn
+}
+
+// workerSlotsForTask keeps an explicit per-task worker override authoritative:
+// a task that asked for N workers gets N unpinned slots, not the global pool
+// plan. Tasks on the global default inherit the pools and their pinned
+// profiles.
+func workerSlotsForTask(t *Task, pools []WorkerPool, global int) ([]WorkerSlot, error) {
+	if t != nil && t.WorkerCount > 0 {
+		return ExpandWorkerSlots(nil, workerCountForTask(t, global))
+	}
+	return ExpandWorkerSlots(pools, global)
+}
+
+func workerCountForTask(t *Task, global int) int {
+	if t != nil && t.WorkerCount > 0 {
+		// A direct database edit bypasses API validation; clamp here so the
+		// engine never forks more worker loops than the supported maximum.
+		if t.WorkerCount > db.MaxTaskWorkerCount {
+			return db.MaxTaskWorkerCount
+		}
+		return t.WorkerCount
+	}
+	return global
+}
+
 // SetAgentResolver installs a per-task planner/worker resolver (wired by the server).
 // Called once at startup before any task loop runs, so no lock is needed on reads.
 func (e *Engine) SetAgentResolver(fn func(t *Task) (*agent.Planner, *agent.Worker)) {
@@ -755,7 +792,13 @@ func (e *Engine) ReadyFor(t *Task) bool {
 // but no-op until an LLM is configured (so a task created while idle picks up
 // automatically once LLM is set from the UI).
 func (e *Engine) Run(ctx context.Context, t *Task) {
-	workers := e.m.Workers()
+	slots, err := workerSlotsForTask(t, e.m.WorkerPools(), e.m.Workers())
+	if err != nil {
+		// A saved pool that no longer validates must not stop the task; fall
+		// back to the flat worker count with no profile pinning.
+		log.Printf("[engine] task %s worker pool invalid, using legacy workers: %v", t.ID, err)
+		slots, _ = ExpandWorkerSlots(nil, workerCountForTask(t, e.m.Workers()))
+	}
 	e.deleteMu.RLock()
 	if e.IsDeleting(t.ID) {
 		e.deleteMu.RUnlock()
@@ -766,13 +809,19 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		t.Notify() // already running — just nudge a planning round
 		return
 	}
-	rt := e.registerTaskRoutines(ctx, t.ID, 1+workers)
+	// The count must match the goroutines actually started below: one too many
+	// and rt.wg never reaches zero, so the task can never settle or be deleted.
+	rt := e.registerTaskRoutines(ctx, t.ID, 1+len(slots))
+	plan := make(map[string]int64, len(slots))
+	for _, slot := range slots {
+		plan[slot.Name] = slot.ProfileID
+	}
+	e.slotPlans.Store(t.ID, plan)
 	e.deleteMu.RUnlock()
 	e.touch(t.ID)
 	runTaskRoutine(rt, func(loopCtx context.Context) { e.plannerLoop(loopCtx, t) })
-	for i := 0; i < workers; i++ {
-		name := fmt.Sprintf("work#%d", i+1)
-		runTaskRoutine(rt, func(loopCtx context.Context) { e.workerLoop(loopCtx, t, name) })
+	for _, slot := range slots {
+		runTaskRoutine(rt, func(loopCtx context.Context) { e.workerLoop(loopCtx, t, slot) })
 	}
 	e.startDeadlineCoordinator(ctx, t) // task-level timeout timer (only when timeout>0; deduplicated)
 	// Kick the first planning round only when there are no active intents at all
@@ -896,6 +945,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			return
 		}
 		defer e.decInflight(t.ID)
+		// Open the execution segment here rather than at admission: this is the
+		// first moment the task is really doing work.
+		if err := e.m.StartTaskRunSegment(t.ID); err != nil {
+			log.Printf("[runtime] task %s start segment failed: %v", t.ID, err)
+		}
 		e.stampFirstRun(t) // first real planning round → stamp first_run_at + compute the deadline (only for tasks with a timeout)
 		e.touch(t.ID)
 		emit := func(r db.Activity) {
@@ -966,14 +1020,28 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 	}
 }
 
-func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
+func (e *Engine) workerLoop(ctx context.Context, t *Task, slot WorkerSlot) {
+	name := slot.Name
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		_, worker := e.snapshotFor(t)
+		var worker *agent.Worker
+		if slot.ProfileID > 0 && e.workerResolve != nil {
+			// A pinned lane resolves its own Worker. On failure the lane idles
+			// and retries; the task keeps running on its other lanes rather
+			// than silently falling back to a different model.
+			resolved, err := e.workerResolve(t, slot)
+			if err != nil {
+				log.Printf("[worker %s] task %s pinned profile #%d unavailable: %v", name, t.ID, slot.ProfileID, err)
+			} else {
+				worker = resolved
+			}
+		} else {
+			_, worker = e.snapshotFor(t)
+		}
 		if worker == nil {
 			if sleepCtx(ctx, 1500*time.Millisecond) {
 				return
@@ -1042,6 +1110,11 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		}
 	}
 	hasChatMessage := message != ""
+	// Open the execution segment here rather than at admission: this is the
+	// first moment the task is really doing work.
+	if err := e.m.StartTaskRunSegment(t.ID); err != nil {
+		log.Printf("[runtime] task %s start segment failed: %v", t.ID, err)
+	}
 	e.stampFirstRun(t) // first real execution → stamp first_run_at + compute the deadline (only for tasks with a timeout)
 	e.touch(t.ID)
 	emit := func(r db.Activity) {
