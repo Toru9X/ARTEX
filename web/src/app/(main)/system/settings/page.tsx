@@ -26,6 +26,7 @@ import type { EgressCheck, Settings } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { useEgressIp } from "../../_components/egress-ip-banner";
+import { BasicAuthCard } from "./_components/basic-auth-card";
 import { ProxyPoolCard } from "./_components/proxy-pool-card";
 
 // egressCheckText renders one probe row: the skip reason, the exit IP, or the
@@ -702,6 +703,8 @@ export default function SystemSettingsPage() {
             />
           </CardContent>
         </Card>
+
+        <BasicAuthCard />
 
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>

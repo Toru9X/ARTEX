@@ -53,6 +53,7 @@ type Server struct {
 	setupToken string // one-time token POST /api/auth/init requires; empty when none is active
 
 	loginLimit     *loginLimiter  // per-IP attempt limit on POST /api/auth/login
+	basicAuth      basicAuthGate  // optional HTTP Basic gate in front of the app login
 	trustedProxies []netip.Prefix // ARTEX_TRUSTED_PROXIES; see clientIP
 
 	// CPU is a rate, so GET /api/system/metrics keeps the previous cgroup
@@ -731,6 +732,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/init", s.authInit)
 	mux.HandleFunc("POST /api/auth/login", s.authLogin)
 	mux.HandleFunc("POST /api/auth/change-password", s.authChangePassword)
+	// The gate itself answers this before the mux is reached; a 204 here means
+	// the request already passed it, which is what the page probes for.
+	mux.HandleFunc("GET /api/basic-auth/check", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /api/settings/basic-auth", s.getBasicAuthSettings)
+	mux.HandleFunc("PUT /api/settings/basic-auth", s.saveBasicAuthSettings)
 
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/stats", s.stats)
@@ -1068,11 +1077,13 @@ func (s *Server) Handler() http.Handler {
 	// /api/* goes through CORS + JWT; everything else is served by the embedded
 	// frontend (public — auth is enforced client-side and on the API). With the
 	// no-embed build the webui handler just 404s (run `next dev` separately).
+	// The optional Basic Auth gate wraps both and sits outside the per-IP login
+	// limiter, so a wrong Basic password never consumes a login attempt.
 	api := cors(s.requireAuth(mux))
 	root := http.NewServeMux()
 	root.Handle("/api/", api)
 	root.Handle("/", s.webuiHandler())
-	return root
+	return s.requireBasicAuth(root)
 }
 
 // --- handlers ---
@@ -4364,8 +4375,23 @@ func (s *Server) gc(w http.ResponseWriter, r *http.Request) {
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// Next dev and the Go SSE endpoint run on different ports of the same
+		// loopback host. Allow the gate cookie for that local pairing only: the
+		// origin host must equal the request host and be loopback.
+		origin := r.Header.Get("Origin")
+		u, err := url.Parse(origin)
+		host, _, hostErr := net.SplitHostPort(r.Host)
+		if hostErr != nil {
+			host = r.Host
+		}
+		if err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() == host &&
+			(host == "localhost" || host == "127.0.0.1" || host == "::1") {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+		w.Header().Add("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(204)
 			return
