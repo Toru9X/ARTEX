@@ -170,6 +170,10 @@ type Traffic struct {
 	// transparent-passthrough paths honor it (go-mitmproxy's getUpstreamConn),
 	// so no host escapes it. Hot-swappable at runtime via SetUpstreamProxy.
 	upstream atomic.Pointer[url.URL]
+	// upstreamFailure is notified when a CONNECT through the upstream proxy
+	// fails. Best-effort and asynchronous: it must never block the MITM.
+	upstreamMu      sync.RWMutex
+	upstreamFailure func(error)
 }
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
@@ -327,6 +331,29 @@ func (t *Traffic) SetUpstreamProxy(raw string) error {
 	return nil
 }
 
+// SetUpstreamFailureHandler installs the callback for a failed CONNECT through
+// the upstream proxy. The callback is intentionally best-effort and must not
+// block the proxy, so it runs on its own goroutine.
+func (t *Traffic) SetUpstreamFailureHandler(fn func(error)) {
+	t.upstreamMu.Lock()
+	t.upstreamFailure = fn
+	t.upstreamMu.Unlock()
+}
+
+func (t *Traffic) reportUpstreamFailure(err error) {
+	// No upstream configured means the dial went direct, so the failure says
+	// nothing about the proxy.
+	if err == nil || t.upstream.Load() == nil {
+		return
+	}
+	t.upstreamMu.RLock()
+	fn := t.upstreamFailure
+	t.upstreamMu.RUnlock()
+	if fn != nil {
+		go fn(err)
+	}
+}
+
 // ValidateProxyURL parses and checks a proxy URL (http/https/socks5, optional
 // user:pass), returning the parsed URL. Exposed so callers can validate a global
 // proxy before persisting it even when the traffic proxy itself is disabled.
@@ -400,7 +427,16 @@ func (s *sink) Response(f *mproxy.Flow) {
 // the failure looks proxy/protocol-caused (h2 quirks, HEAD-with-body, protocol
 // errors) — not a plain target-unreachable error — we flag the host for
 // transparent passthrough so future requests to it succeed instead of dying.
-func (s *sink) RequestError(f *mproxy.Flow, err error) { s.t.maybePassthrough(f, err) }
+func (s *sink) RequestError(f *mproxy.Flow, err error) {
+	s.t.reportUpstreamFailure(err)
+	s.t.maybePassthrough(f, err)
+}
+
+// HTTPConnectError fires when the CONNECT to the upstream proxy itself fails —
+// the clearest signal that the global proxy is down.
+func (s *sink) HTTPConnectError(_ *mproxy.Flow, err error) {
+	s.t.reportUpstreamFailure(err)
+}
 
 // maybePassthrough marks a host to be tunneled transparently on the next
 // connection, but only for errors the proxy itself caused — a target that is

@@ -108,6 +108,17 @@ func (s *Server) admitPausedTask(t *Task) (queued bool, err error) {
 }
 
 func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued bool, err error) {
+	return s.admitTaskWhenGuarded(t, mode, requirePaused, "", 0, false)
+}
+
+// admitTaskWhenGuarded is admitTaskWhen with the two guards the proxy
+// auto-resume needs. requiredReason resumes only a task still paused for that
+// reason, so a user pause that landed during the outage is never revived.
+// checkGeneration additionally requires the reconnect round to be unchanged: a
+// late success from a previous outage must not resume a task that has been
+// paused again since. Both are evaluated under concMu, next to the other
+// pre-admission checks, so the decision cannot race a concurrent transition.
+func (s *Server) admitTaskWhenGuarded(t *Task, mode string, requirePaused bool, requiredReason string, requiredGeneration uint64, checkGeneration bool) (queued bool, err error) {
 	if t == nil {
 		return false, fmt.Errorf("task not found")
 	}
@@ -134,6 +145,12 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 		}
 		if !lifecycle.Paused {
 			return false, fmt.Errorf("only a paused task can be resumed")
+		}
+		if requiredReason != "" && lifecycle.PauseReason != requiredReason {
+			return false, fmt.Errorf("the task's pause reason has changed")
+		}
+		if checkGeneration && lifecycle.ReconnectGeneration != requiredGeneration {
+			return false, fmt.Errorf("the task's proxy reconnect round has changed")
 		}
 		mode = s.resumeAdmissionMode(t)
 	}

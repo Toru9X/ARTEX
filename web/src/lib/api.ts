@@ -36,6 +36,8 @@ import type {
   Edge,
   EvidenceBodyPreview,
   EgressReport,
+  ProxyPoolEntry,
+  ProxySwitchLog,
   ExplorationNodePage,
   ExplorationNodeQuery,
   Finding,
@@ -212,6 +214,12 @@ const del = <T>(p: string, body?: unknown) =>
 
 // Go serializes nil slices as JSON null — coerce to [].
 const arr = <T>(x: T[] | null | undefined): T[] => x ?? [];
+// Empty Go slices can arrive as null. Keep proxy-pool consumers safe across
+// the initial load, import and health-check refreshes.
+function normalizeProxyPool<T extends { entries: ProxyPoolEntry[]; switch_log: ProxySwitchLog[] }>(pool: T): T {
+  return { ...pool, entries: arr(pool.entries), switch_log: arr(pool.switch_log) };
+}
+
 const tq = (task?: string, sep: "?" | "&" = "?") => (task ? `${sep}task=${encodeURIComponent(task)}` : "");
 
 // findingFilterParams serializes the findings page filters into a query string. List /
@@ -837,6 +845,38 @@ export const api = {
   // omitted = the saved address, "" = the built-in defaults, set = a temporary override.
   testEgressProxy: (patch: { global_proxy?: string; probe_url?: string }) =>
     post<EgressReport>(`/settings/proxy/test`, patch),
+
+  // ---- Proxy pool ----
+  proxyPool: () =>
+    get<{ entries: ProxyPoolEntry[]; active_id: string; active_proxy: string; switch_log: ProxySwitchLog[] }>(
+      `/settings/proxy-pool`,
+    ).then(normalizeProxyPool),
+  importProxyPool: (payload: Record<string, unknown>) =>
+    post<{
+      entries: ProxyPoolEntry[];
+      active_id: string;
+      switch_log: ProxySwitchLog[];
+      errors: Array<{ line: number; input: string; error: string }>;
+    }>(`/settings/proxy-pool/import`, payload).then((r) => ({ ...normalizeProxyPool(r), errors: arr(r.errors) })),
+  updateProxyPool: (id: string, payload: Partial<Pick<ProxyPoolEntry, "url" | "name" | "remark" | "enabled">>) =>
+    put<{ entry: ProxyPoolEntry }>(`/settings/proxy-pool/${encodeURIComponent(id)}`, payload),
+  deleteProxyPool: (id: string) => del<{ ok: boolean }>(`/settings/proxy-pool/${encodeURIComponent(id)}`),
+  testProxyPoolEntry: (id: string) =>
+    post<{ ok: boolean; result?: EgressReport["checks"][number]["result"] }>(
+      `/settings/proxy-pool/${encodeURIComponent(id)}/test`,
+      {},
+    ),
+  testAllProxyPool: () =>
+    post<{ entries: ProxyPoolEntry[]; active_id: string; switch_log: ProxySwitchLog[] }>(
+      `/settings/proxy-pool/test-all`,
+      {},
+    ).then(normalizeProxyPool),
+  activateProxyPool: (id: string) =>
+    post<{ ok: boolean; active_id: string; active_proxy: string }>(
+      `/settings/proxy-pool/${encodeURIComponent(id)}/activate`,
+      {},
+    ),
+  testTaskProxy: (taskID: string) => post<{ ok: boolean; error?: string }>(`/tasks/${taskID}/proxy/test`, {}),
 
   // ---- Vulnerability IM push ----
   // Channels are multi-instance resources (several bots of the same kind, each with its own

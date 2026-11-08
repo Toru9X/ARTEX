@@ -22,25 +22,27 @@ type Task struct {
 	ExplorationID int64      `json:"exploration_id"`
 	Status        string     `json:"status"`
 	Paused        bool       `json:"paused"`
-	Queued        bool       `json:"queued"`
-	QueuedAt      *time.Time `json:"queued_at,omitempty"`
-	QueueMode     string     `json:"queue_mode,omitempty"`
-	LLMProfileID  *int64     `json:"llm_profile_id,omitempty"`
+	// PauseReason names who paused the task; see schema.sql. Empty when running.
+	PauseReason  string     `json:"pause_reason,omitempty"`
+	Queued       bool       `json:"queued"`
+	QueuedAt     *time.Time `json:"queued_at,omitempty"`
+	QueueMode    string     `json:"queue_mode,omitempty"`
+	LLMProfileID *int64     `json:"llm_profile_id,omitempty"`
 	// Task-level ordered LLM chain. LLMProfileID remains the compatibility alias
 	// for ActiveLLMProfileID while older API clients still send one profile id.
-	LLMProfileIDs      []int64    `json:"llm_profile_ids,omitempty"`
-	ActiveLLMProfileID *int64     `json:"active_llm_profile_id,omitempty"`
-	LLMChainRevision   int64      `json:"-"`
-	LLMFailoverState   string     `json:"llm_failover_state,omitempty"`
-	LLMFailoverReason  string     `json:"llm_failover_reason,omitempty"`
+	LLMProfileIDs      []int64 `json:"llm_profile_ids,omitempty"`
+	ActiveLLMProfileID *int64  `json:"active_llm_profile_id,omitempty"`
+	LLMChainRevision   int64   `json:"-"`
+	LLMFailoverState   string  `json:"llm_failover_state,omitempty"`
+	LLMFailoverReason  string  `json:"llm_failover_reason,omitempty"`
 	// LLMRotate: per-intent chain-head rotation switch (#85); false = classic
 	// ordered failover from the active head.
-	LLMRotate bool `json:"llm_rotate"`
-	SourceTaskIDs      []int64    `json:"source_task_ids,omitempty"`
-	CompanyIDs         []int64    `json:"company_ids,omitempty"`
-	ParentRef          string     `json:"parent_ref,omitempty"` // parent task id (recorded by orchestration spawn; empty=top level)
-	CreatedAt          time.Time  `json:"created_at"`
-	CompletedAt        *time.Time `json:"completed_at,omitempty"` // when it entered a terminal state (done/failed/timeout); nil for non-terminal
+	LLMRotate     bool       `json:"llm_rotate"`
+	SourceTaskIDs []int64    `json:"source_task_ids,omitempty"`
+	CompanyIDs    []int64    `json:"company_ids,omitempty"`
+	ParentRef     string     `json:"parent_ref,omitempty"` // parent task id (recorded by orchestration spawn; empty=top level)
+	CreatedAt     time.Time  `json:"created_at"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty"` // when it entered a terminal state (done/failed/timeout); nil for non-terminal
 	// Task-level timeout (see the task-level timeout and wrap-up design doc).
 	TimeoutSeconds int        `json:"timeout_seconds"`        // 0=no time limit
 	FirstRunAt     *time.Time `json:"first_run_at,omitempty"` // when it first actually started running (not created_at); nil=not yet run
@@ -370,11 +372,11 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 
 const taskCols = `id, COALESCE(name,''), category_id,
 COALESCE((SELECT category.name FROM task_categories category WHERE category.id=tasks.category_id),''),
-description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(plan_quiet_mode,true), COALESCE(coverage_enabled,true), COALESCE(llm_rotate,false), first_run_at, deadline_at`
+description, goal, exploration_id, status, paused, COALESCE(pause_reason,''), queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(plan_quiet_mode,true), COALESCE(coverage_enabled,true), COALESCE(llm_rotate,false), first_run_at, deadline_at`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.PlanQuietMode, &t.CoverageEnabled, &t.LLMRotate, &t.FirstRunAt, &t.DeadlineAt); err != nil {
+	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.PauseReason, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.PlanQuietMode, &t.CoverageEnabled, &t.LLMRotate, &t.FirstRunAt, &t.DeadlineAt); err != nil {
 		return nil, err
 	}
 	t.Pinned = t.PinnedAt != nil
@@ -510,6 +512,9 @@ func (d *DB) SetStatus(id int64, status string) error {
 	_, err := d.Exec(`
 UPDATE tasks
    SET status = $1,
+       -- A terminal task is never auto-resumed, so drop its proxy-pause
+       -- eligibility along with the status.
+       pause_reason = CASE WHEN $1 IN ('done','failed','timeout') THEN '' ELSE pause_reason END,
        completed_at = CASE WHEN $1 IN ('done','failed','timeout') THEN COALESCE(completed_at, now()) ELSE NULL END
  WHERE id = $2`, status, id)
 	return err
@@ -523,6 +528,7 @@ func (d *DB) SetTerminalStatusGuarded(id int64, status string) (won bool, err er
 	res, err := d.Exec(`
 UPDATE tasks
    SET status = $1,
+       pause_reason = '',
        completed_at = COALESCE(completed_at, now())
  WHERE id = $2 AND status NOT IN ('done','failed','timeout')`, status, id)
 	if err != nil {

@@ -933,6 +933,18 @@ export interface Settings {
   // Whether the navbar polls and shows the current exit IP. Off by default: each
   // poll is a real outbound request.
   show_egress_ip?: boolean;
+  // Proxy pool rotation and health policy. The entries themselves are a
+  // separate resource under /api/settings/proxy-pool.
+  proxy_rotate_timed_enabled?: boolean;
+  proxy_rotate_interval_seconds?: number;
+  proxy_rotate_on_failure?: boolean;
+  proxy_rotate_strategy?: "sequential" | "random";
+  proxy_health_fail_threshold?: number;
+  proxy_health_cooldown_seconds?: number;
+  proxy_health_check_interval_seconds?: number;
+  // Auto-resume cadence for tasks paused by a proxy outage.
+  proxy_reconnect_max_attempts?: number;
+  proxy_reconnect_interval_seconds?: number;
   python_interpreter?: string; // python interpreter path for custom script tools (empty = detect at runtime)
   workers?: number; // concurrent worker agent count (default 3); applies to tasks started afterwards
   // Task concurrency cap: max simultaneously "running" tasks. Off = unlimited; on, new tasks beyond the limit queue and start automatically when a slot frees up.
@@ -1327,6 +1339,29 @@ export interface EgressReport {
   agent_proxy: string;
   checks: EgressCheck[];
   warnings?: string[];
+}
+
+// ---- Proxy pool ----
+// url is always masked in API responses; credentials never leave the server.
+export interface ProxyPoolEntry {
+  id: string;
+  url: string;
+  name?: string;
+  remark?: string;
+  enabled: boolean;
+  egress_ip?: string;
+  latency_ms?: number;
+  last_error?: string;
+  last_checked_at?: string;
+  consecutive_failures: number;
+  health: "healthy" | "unhealthy-cooling" | "disabled" | string;
+}
+
+export interface ProxySwitchLog {
+  at: string;
+  from: string;
+  to: string;
+  reason: string;
 }
 
 // ---- Intercept Rules ----

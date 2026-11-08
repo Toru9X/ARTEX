@@ -1483,3 +1483,9 @@ CREATE TABLE IF NOT EXISTS rsi_lesson_usage (
     shown_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (lesson_id, task_id, mode)
 );
+
+-- Who paused a task: '' (not paused / user pause predating this column),
+-- paused_by_user, paused_by_orchestrator or paused_by_proxy. The proxy
+-- supervisor resumes only the tasks it paused itself, so a user pause that
+-- lands during an outage is never revived by a recovering proxy.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pause_reason TEXT NOT NULL DEFAULT '';

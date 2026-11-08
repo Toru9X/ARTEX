@@ -26,6 +26,7 @@ import type { EgressCheck, Settings } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { useEgressIp } from "../../_components/egress-ip-banner";
+import { ProxyPoolCard } from "./_components/proxy-pool-card";
 
 // egressCheckText renders one probe row: the skip reason, the exit IP, or the
 // most specific failure available. probes[] carries the per-address error,
@@ -54,6 +55,9 @@ export default function SystemSettingsPage() {
   const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
+  // The full settings object, so child cards can read fields the page itself
+  // does not keep in its own state.
+  const [settings, setSettings] = React.useState<Settings | null>(null);
   const [saving, setSaving] = React.useState(false);
   const [savingKey, setSavingKey] = React.useState(false);
   const [pyInterp, setPyInterp] = React.useState("");
@@ -81,6 +85,7 @@ export default function SystemSettingsPage() {
   const sendMode = useChatSendMode();
 
   const apply = React.useCallback((s: Settings) => {
+    setSettings(s);
     setTrafficCapture(!!s.traffic_capture);
     setAgentTrafficBinding(!!s.agent_traffic_binding);
     setWebSearch(!!s.web_search_enabled);
@@ -509,6 +514,8 @@ export default function SystemSettingsPage() {
             )}
           </CardContent>
         </Card>
+
+        <ProxyPoolCard settings={settings} loaded={loaded} onSettingsSaved={apply} />
 
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>

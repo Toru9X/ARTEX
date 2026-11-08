@@ -155,6 +155,9 @@ type Engine struct {
 	// readiness reports whether a global LLM provider is configured — the signal behind
 	// Ready()/the llm_configured indicator. Wired once at startup; nil → not ready.
 	readiness func() bool
+	// proxyFailure reports a suspected global-proxy outage for a task; the
+	// Server installs it, so it stays nil for a bare Engine in tests.
+	proxyFailure func(taskID string, err error)
 }
 
 type taskRuntime struct {
@@ -704,6 +707,8 @@ func (e *Engine) appendActivity(t *Task, r db.Activity) (int64, error) {
 // Ready() / the llm_configured indicator). Called once at startup.
 func (e *Engine) SetReadiness(fn func() bool) { e.readiness = fn }
 
+func (e *Engine) SetProxyFailureHandler(fn func(string, error)) { e.proxyFailure = fn }
+
 // SetAgentResolver installs a per-task planner/worker resolver (wired by the server).
 // Called once at startup before any task loop runs, so no lock is needed on reads.
 func (e *Engine) SetAgentResolver(fn func(t *Task) (*agent.Planner, *agent.Worker)) {
@@ -893,7 +898,15 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		defer e.decInflight(t.ID)
 		e.stampFirstRun(t) // first real planning round → stamp first_run_at + compute the deadline (only for tasks with a timeout)
 		e.touch(t.ID)
-		emit := func(r db.Activity) { e.emitActivity(t, r) }
+		emit := func(r db.Activity) {
+			// A tool that failed to dial the global proxy is the earliest signal
+			// of an outage; the proxy supervisor pauses the task and resumes it
+			// once the proxy answers again.
+			if r.Kind == "tool_result" && r.IsError && e.proxyFailure != nil && isGlobalProxyDialFailure(errors.New(r.Detail+" "+r.Summary)) {
+				e.proxyFailure(t.ID, errors.New(r.Detail+" "+r.Summary))
+			}
+			e.emitActivity(t, r)
+		}
 		ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // cancellable by Pause; carries the task deadline
 		if ectx.Err() != nil || e.IsDeleting(t.ID) {
 			return
@@ -913,6 +926,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		switch {
 		case err != nil && ectx.Err() == nil:
 			log.Printf("[planner] task %s planning error: %v", t.ID, err)
+			if e.proxyFailure != nil && isProxyFailure(err) {
+				e.proxyFailure(t.ID, err)
+			}
 		case met:
 			log.Printf("[planner] task %s judged all goals met: %s", t.ID, reason)
 			// All goals met → persist the task state as done (the frontend DTO shows this terminal state first).
@@ -1028,7 +1044,15 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	hasChatMessage := message != ""
 	e.stampFirstRun(t) // first real execution → stamp first_run_at + compute the deadline (only for tasks with a timeout)
 	e.touch(t.ID)
-	emit := func(r db.Activity) { e.emitActivity(t, r) }
+	emit := func(r db.Activity) {
+		// A tool that failed to dial the global proxy is the earliest signal
+		// of an outage; the proxy supervisor pauses the task and resumes it
+		// once the proxy answers again.
+		if r.Kind == "tool_result" && r.IsError && e.proxyFailure != nil && isGlobalProxyDialFailure(errors.New(r.Detail+" "+r.Summary)) {
+			e.proxyFailure(t.ID, errors.New(r.Detail+" "+r.Summary))
+		}
+		e.emitActivity(t, r)
+	}
 	ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // cancellable by Pause; carries the task deadline
 	if ectx.Err() != nil || e.IsDeleting(t.ID) {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
@@ -1067,6 +1091,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
 	} else {
 		reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
+	}
+	if err != nil && e.proxyFailure != nil && isProxyFailure(err) {
+		e.proxyFailure(t.ID, err)
 	}
 	e.EndLLMCall(t.ID)
 	// model_error finish → a few extra reruns (retry after backoff). Retry only while
@@ -1262,7 +1289,7 @@ func taskExecutionPaused(cause error) bool {
 		return false
 	}
 	switch abort.Code {
-	case "paused_by_user", "paused_by_orchestrator", "paused_on_reload", "paused_race_guard",
+	case "paused_by_user", "paused_by_orchestrator", "paused_by_proxy", "paused_on_reload", "paused_race_guard",
 		"queued_for_admission", "llm_unavailable_queued", "task_deleted":
 		return true
 	default:

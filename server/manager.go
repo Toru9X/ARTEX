@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
@@ -39,7 +40,21 @@ type Task struct {
 	CreatedAt    int64  `json:"created_at"`
 	CompletedAt  int64  `json:"completed_at,omitempty"` // unix seconds when a terminal state was reached; 0 = not finished
 	Paused       bool   `json:"paused"`
-	Queued       bool   `json:"queued"` // parked by the concurrency cap, waiting for a free slot to auto-start; true = not started yet
+	// PauseReason names who paused the task (paused_by_user /
+	// paused_by_orchestrator / paused_by_proxy); empty while running.
+	PauseReason string `json:"pause_reason,omitempty"`
+	// Reconnect* is the in-memory auto-resume state for a paused_by_proxy task.
+	// Not persisted: an outage does not survive a restart, and on reload the
+	// task simply stays paused until the supervisor adopts it again.
+	ReconnectAttempt   int    `json:"-"`
+	ReconnectMax       int    `json:"-"`
+	ReconnectNextAt    int64  `json:"-"`
+	ReconnectExhausted bool   `json:"-"`
+	ReconnectLastError string `json:"-"`
+	// ReconnectGeneration is bumped on every new proxy pause, so a late success
+	// from a previous outage cannot resume a task paused again since.
+	ReconnectGeneration uint64 `json:"-"`
+	Queued              bool   `json:"queued"` // parked by the concurrency cap, waiting for a free slot to auto-start; true = not started yet
 	// QueuedAt is an internal Unix-nanosecond ordering key. It is deliberately
 	// finer than CreatedAt so several tasks enqueued in the same second retain
 	// their real FIFO order.
@@ -52,13 +67,13 @@ type Task struct {
 	LLMChainRevision   int64   `json:"-"`
 	LLMFailoverState   string  `json:"llm_failover_state,omitempty"`
 	// LLMRotate (#85): per-intent round-robin over the task's LLM chain heads.
-	LLMRotate  bool `json:"llm_rotate,omitempty"`
-	rotateMu   sync.Mutex
-	rotateNext int
-	LLMFailoverReason  string  `json:"llm_failover_reason,omitempty"`
-	SourceTaskIDs      []int64 `json:"source_task_ids,omitempty"`
-	CompanyIDs         []int64 `json:"company_ids,omitempty"`
-	Status             string  `json:"status"` // persisted lifecycle status (done/failed/timeout are terminal; empty/other is derived from runtime state)
+	LLMRotate         bool `json:"llm_rotate,omitempty"`
+	rotateMu          sync.Mutex
+	rotateNext        int
+	LLMFailoverReason string  `json:"llm_failover_reason,omitempty"`
+	SourceTaskIDs     []int64 `json:"source_task_ids,omitempty"`
+	CompanyIDs        []int64 `json:"company_ids,omitempty"`
+	Status            string  `json:"status"` // persisted lifecycle status (done/failed/timeout are terminal; empty/other is derived from runtime state)
 	// Task-level timeout (see docs/task-timeout-and-settle-design.md). DeadlineAt/FirstRunAt are unix seconds, 0 = unset/not yet run.
 	TimeoutSeconds       int                    `json:"timeout_seconds"`
 	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner heartbeat trigger interval (seconds)
@@ -84,20 +99,33 @@ type Task struct {
 // updateLifecycle instead of reading or writing the corresponding Task fields
 // directly after the task has been published by Manager.
 type taskLifecycleState struct {
-	Name          string
-	PinnedAt      int64
-	Status        string
-	Paused        bool
-	Queued        bool
-	QueuedAt      int64
-	QueueMode     string
-	CompletedAt   int64
-	FirstRunAt    int64
-	DeadlineAt    int64
-	SourceTaskIDs []int64
-	CompanyIDs    []int64
-	CategoryID    *int64
-	CategoryName  string
+	// PauseReason is a stable API value naming who paused the task:
+	// paused_by_user / paused_by_orchestrator / paused_by_proxy. The proxy
+	// supervisor resumes only the tasks it paused itself.
+	PauseReason string
+	// Reconnect* track the auto-resume attempt for a paused_by_proxy task.
+	// Generation is bumped on every new pause so a late success from a previous
+	// outage cannot resume a task that has since been paused again.
+	ReconnectAttempt    int
+	ReconnectMax        int
+	ReconnectNextAt     int64
+	ReconnectExhausted  bool
+	ReconnectLastError  string
+	ReconnectGeneration uint64
+	Name                string
+	PinnedAt            int64
+	Status              string
+	Paused              bool
+	Queued              bool
+	QueuedAt            int64
+	QueueMode           string
+	CompletedAt         int64
+	FirstRunAt          int64
+	DeadlineAt          int64
+	SourceTaskIDs       []int64
+	CompanyIDs          []int64
+	CategoryID          *int64
+	CategoryName        string
 }
 
 func (t *Task) lifecycleSnapshot() taskLifecycleState {
@@ -111,20 +139,27 @@ func (t *Task) lifecycleSnapshot() taskLifecycleState {
 
 func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 	return taskLifecycleState{
-		Name:          t.Name,
-		PinnedAt:      t.PinnedAt,
-		Status:        t.Status,
-		Paused:        t.Paused,
-		Queued:        t.Queued,
-		QueuedAt:      t.QueuedAt,
-		QueueMode:     t.QueueMode,
-		CompletedAt:   t.CompletedAt,
-		FirstRunAt:    t.FirstRunAt,
-		DeadlineAt:    t.DeadlineAt,
-		SourceTaskIDs: append([]int64(nil), t.SourceTaskIDs...),
-		CompanyIDs:    append([]int64(nil), t.CompanyIDs...),
-		CategoryID:    cloneInt64Ptr(t.CategoryID),
-		CategoryName:  t.CategoryName,
+		Name:                t.Name,
+		PinnedAt:            t.PinnedAt,
+		Status:              t.Status,
+		Paused:              t.Paused,
+		PauseReason:         t.PauseReason,
+		ReconnectAttempt:    t.ReconnectAttempt,
+		ReconnectMax:        t.ReconnectMax,
+		ReconnectNextAt:     t.ReconnectNextAt,
+		ReconnectExhausted:  t.ReconnectExhausted,
+		ReconnectLastError:  t.ReconnectLastError,
+		ReconnectGeneration: t.ReconnectGeneration,
+		Queued:              t.Queued,
+		QueuedAt:            t.QueuedAt,
+		QueueMode:           t.QueueMode,
+		CompletedAt:         t.CompletedAt,
+		FirstRunAt:          t.FirstRunAt,
+		DeadlineAt:          t.DeadlineAt,
+		SourceTaskIDs:       append([]int64(nil), t.SourceTaskIDs...),
+		CompanyIDs:          append([]int64(nil), t.CompanyIDs...),
+		CategoryID:          cloneInt64Ptr(t.CategoryID),
+		CategoryName:        t.CategoryName,
 	}
 }
 
@@ -139,6 +174,13 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.PinnedAt = state.PinnedAt
 	t.Status = state.Status
 	t.Paused = state.Paused
+	t.PauseReason = state.PauseReason
+	t.ReconnectAttempt = state.ReconnectAttempt
+	t.ReconnectMax = state.ReconnectMax
+	t.ReconnectNextAt = state.ReconnectNextAt
+	t.ReconnectExhausted = state.ReconnectExhausted
+	t.ReconnectLastError = state.ReconnectLastError
+	t.ReconnectGeneration = state.ReconnectGeneration
 	t.Queued = state.Queued
 	t.QueuedAt = state.QueuedAt
 	t.QueueMode = state.QueueMode
@@ -267,6 +309,15 @@ type Manager struct {
 	// capture is on it becomes the MITM's upstream; when capture is off it is
 	// injected into agent bash env / WebFetch directly. See ProxyAddr.
 	globalProxy string
+	// controlMu, when attached, is the Server's task-control mutex. The proxy
+	// pause takes it so a caller can install the Engine barrier before a
+	// concurrent user pause can observe the new paused state.
+	controlMu    *sync.Mutex
+	proxyPool    *proxyPoolState
+	forwardProxy *dynamicForwardProxy
+	// proxyPoolConfigured stays false until the pool actually holds an entry,
+	// so an installation that never uses the pool behaves exactly as before.
+	proxyPoolConfigured atomic.Bool
 }
 
 // Settings keys the UI toggles at runtime.
@@ -404,6 +455,17 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		log.Printf("[llmusage] create table: %v", err)
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
+	// A stable, credential-free local address agents can be handed once. Each
+	// request resolves the current upstream, so switching the active pool entry
+	// does not have to rebuild agents or MCP servers.
+	if fp, ferr := newDynamicForwardProxy(func() string { return m.GlobalProxy() }); ferr == nil {
+		m.forwardProxy = fp
+		// An empty runtime route means direct egress, even when the persisted
+		// pool still holds disabled or blank entries.
+		fp.direct = func() bool { return strings.TrimSpace(m.GlobalProxy()) == "" }
+	} else {
+		log.Printf("[proxy] local forwarder disabled: %v", ferr)
+	}
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
@@ -464,6 +526,7 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
 		m.globalProxy = strings.TrimSpace(v)
 	}
+	m.initProxyPool()
 	if m.traffic != nil {
 		if err := m.traffic.SetUpstreamProxy(m.globalProxy); err != nil {
 			log.Printf("[proxy] global proxy %q invalid, ignored: %v", m.globalProxy, err)
@@ -811,8 +874,17 @@ func (m *Manager) ProxyAddr() string {
 		return m.traffic.ProxyAddr()
 	}
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.globalProxy
+	global := m.globalProxy
+	m.mu.RUnlock()
+	// Route through the local forwarder whenever an upstream may change under
+	// the agents: credentials stay out of the agent environment, and a pool
+	// switch takes effect on the next request instead of needing a rebuild.
+	if (global != "" || m.proxyPoolConfigured.Load()) && m.forwardProxy != nil {
+		return m.forwardProxy.Addr()
+	}
+	// No forwarder (its listener failed to start): hand back the real value, as
+	// before this feature existed. Masking here would guarantee a broken proxy.
+	return global
 }
 
 // ProxyCACert returns the CA cert path agents must trust to verify HTTPS through
@@ -842,7 +914,33 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw != "" {
 		if _, err := traffic.ValidateProxyURL(raw); err != nil {
-			return err
+			return fmt.Errorf("%s", maskSecrets(err.Error()))
+		}
+	}
+	if m.proxyPool != nil {
+		m.proxyPool.mu.Lock()
+		managed := len(m.proxyPool.entries) > 0
+		if !managed && raw != "" {
+			// First proxy saved through the legacy field: adopt it as the pool's
+			// single member so one code path owns the active route from here on.
+			m.proxyPool.entries = []proxyPoolEntry{{ProxyPoolEntry: ProxyPoolEntry{ID: "proxy-legacy", URL: maskSecrets(raw), Enabled: true, Health: "healthy"}, RawURL: raw}}
+			m.proxyPool.active = "proxy-legacy"
+			m.proxyPoolConfigured.Store(true)
+			if err := m.applyActiveProxyLocked("proxy-legacy", "manual"); err != nil {
+				m.proxyPool.entries = nil
+				m.proxyPool.active = ""
+				m.proxyPool.mu.Unlock()
+				return err
+			}
+			m.proxyPool.mu.Unlock()
+			return nil
+		}
+		m.proxyPool.mu.Unlock()
+		if managed {
+			// Once a pool exists the legacy field is a read-only echo of the
+			// active entry. The pool API is the sole authority for health,
+			// enablement and switching; a write here would desynchronise them.
+			return nil
 		}
 	}
 	if err := m.pg.SetSetting(settingGlobalProxy, raw); err != nil {
@@ -862,6 +960,9 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 }
 
 func (m *Manager) Close() error {
+	if m.forwardProxy != nil {
+		_ = m.forwardProxy.Close()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.traffic != nil {
@@ -895,7 +996,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		Name:       pt.Name,
 		CategoryID: cloneInt64Ptr(pt.CategoryID), CategoryName: pt.CategoryName,
 		PinnedAt:    unixOrZero(pt.PinnedAt),
-		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, Queued: pt.Queued,
+		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, PauseReason: pt.PauseReason, Queued: pt.Queued,
 		QueuedAt: unixNanoOrZero(pt.QueuedAt), QueueMode: pt.QueueMode,
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,
 		LLMProfileID:  pt.LLMProfileID,
@@ -1234,7 +1335,7 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 	        WHEN $2 IN ('done','failed','timeout') THEN COALESCE(completed_at, now())
 	        ELSE NULL
 	    END,
-	    paused=false,
+	    paused=false, pause_reason='',
 	    queued=$3,
 	    queued_at=CASE
 	        WHEN NOT $3 THEN NULL
@@ -1273,6 +1374,9 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 		t.updateLifecycle(func(state *taskLifecycleState) {
 			state.Status = status
 			state.Paused = false
+			state.PauseReason = ""
+			state.ReconnectAttempt, state.ReconnectMax, state.ReconnectNextAt = 0, 0, 0
+			state.ReconnectExhausted, state.ReconnectLastError = false, ""
 			state.Queued = queued
 			state.QueueMode = committedMode
 			state.QueuedAt = 0
@@ -1312,7 +1416,7 @@ func (m *Manager) ApplyTaskPause(id string) error {
 	}
 	var mode string
 	err = m.pg.QueryRow(`UPDATE tasks
-		SET paused=true, queued=false, queued_at=NULL, paused_at=now()
+		SET paused=true, pause_reason='paused_by_user', queued=false, queued_at=NULL, paused_at=now()
 		WHERE id=$1 AND deleted_at IS NULL AND paused=false
 		  AND status NOT IN ('done','failed','timeout')
 		RETURNING COALESCE(queue_mode,'')`, n).Scan(&mode)
@@ -1326,12 +1430,90 @@ func (m *Manager) ApplyTaskPause(id string) error {
 	if t := m.tasks[id]; t != nil {
 		t.updateLifecycle(func(state *taskLifecycleState) {
 			state.Paused = true
+			state.PauseReason = "paused_by_user"
 			state.Queued = false
 			state.QueuedAt = 0
 			state.QueueMode = mode
 		})
 	}
 	m.mu.Unlock()
+	return nil
+}
+
+// SetTaskControlMutex attaches the Server's task-control mutex; see controlMu.
+func (m *Manager) SetTaskControlMutex(mu *sync.Mutex) { m.controlMu = mu }
+
+// ApplyProxyPause atomically pauses a running task and marks it eligible for
+// reconnect auto-resume. An already-paused task keeps its original reason.
+func (m *Manager) ApplyProxyPause(id string) error {
+	_, err := m.ApplyProxyPauseWithCallback(id, nil)
+	return err
+}
+
+// ApplyProxyPauseWithCallback is the locked proxy-pause transition. When the
+// task really moves from running to paused, callback runs while the Server's
+// task-control mutex is still held and after the database and live lifecycle
+// state have committed. That lets the caller install the Engine barrier before
+// a concurrent user or orchestrator pause can observe the new paused state.
+func (m *Manager) ApplyProxyPauseWithCallback(id string, callback func()) (transitioned bool, err error) {
+	if m.controlMu != nil {
+		m.controlMu.Lock()
+		defer m.controlMu.Unlock()
+	}
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return false, err
+	}
+	var mode string
+	err = m.pg.QueryRow(`UPDATE tasks
+		SET paused=true, pause_reason='paused_by_proxy', queued=false, queued_at=NULL, paused_at=now()
+		WHERE id=$1 AND deleted_at IS NULL AND paused=false
+		  AND status NOT IN ('done','failed','timeout')
+		RETURNING COALESCE(queue_mode,'')`, n).Scan(&mode)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Already paused, terminal or deleted: nothing to transition, and the
+		// existing pause reason must not be overwritten.
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	m.mu.RLock()
+	t := m.tasks[id]
+	m.mu.RUnlock()
+	if t != nil {
+		t.updateLifecycle(func(s *taskLifecycleState) {
+			s.Paused = true
+			s.PauseReason = "paused_by_proxy"
+			s.Queued = false
+			s.QueuedAt = 0
+			s.QueueMode = mode
+		})
+	}
+	if callback != nil {
+		callback()
+	}
+	return true, nil
+}
+
+// ClearPauseReason removes auto-resume eligibility without changing the
+// lifecycle: the task stays paused, the supervisor just stops adopting it.
+func (m *Manager) ClearPauseReason(id string) error {
+	if _, err := m.pg.Exec(`UPDATE tasks SET pause_reason='' WHERE id=$1 AND pause_reason='paused_by_proxy'`, id); err != nil {
+		return err
+	}
+	m.mu.RLock()
+	t := m.tasks[id]
+	m.mu.RUnlock()
+	if t != nil && t.lifecycleSnapshot().PauseReason == "paused_by_proxy" {
+		t.updateLifecycle(func(s *taskLifecycleState) {
+			s.PauseReason = ""
+			s.ReconnectAttempt, s.ReconnectMax, s.ReconnectNextAt = 0, 0, 0
+			s.ReconnectExhausted, s.ReconnectLastError = false, ""
+		})
+	}
 	return nil
 }
 
@@ -1465,6 +1647,9 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 	if t := m.tasks[id]; t != nil {
 		t.updateLifecycle(func(state *taskLifecycleState) {
 			state.Status = status
+			state.PauseReason = ""
+			state.ReconnectAttempt, state.ReconnectMax, state.ReconnectNextAt = 0, 0, 0
+			state.ReconnectExhausted, state.ReconnectLastError = false, ""
 			if state.CompletedAt == 0 {
 				state.CompletedAt = time.Now().Unix()
 			}
@@ -1494,6 +1679,9 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 			// Mirror the DB's completed_at stamp on the live handle so the DTO shows
 			// the finish time without a reload (terminal -> stamp once; else clear).
 			if pgdb.IsTerminal(status) {
+				state.PauseReason = ""
+				state.ReconnectAttempt, state.ReconnectMax, state.ReconnectNextAt = 0, 0, 0
+				state.ReconnectExhausted, state.ReconnectLastError = false, ""
 				if state.CompletedAt == 0 {
 					state.CompletedAt = time.Now().Unix()
 				}

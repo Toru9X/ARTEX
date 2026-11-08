@@ -115,6 +115,32 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 			return out, fmt.Errorf("cannot pause a task in a terminal state")
 		}
 		if lifecycle.Paused {
+			// A task already paused by the proxy supervisor can still be taken
+			// over by a user or orchestrator pause: that ends auto-resume
+			// eligibility, so a recovering proxy must not revive it later.
+			if lifecycle.PauseReason == "paused_by_proxy" {
+				if pauseCause == nil {
+					pauseCause = agent.AbortPausedByUser
+				}
+				reason := "paused_by_user"
+				if pauseCause == agent.AbortPausedByOrchestrator {
+					reason = "paused_by_orchestrator"
+				}
+				if _, err := s.m.pg.Exec(`UPDATE tasks SET pause_reason=$2 WHERE id=$1`, t.ID, reason); err != nil {
+					return out, err
+				}
+				t.updateLifecycle(func(state *taskLifecycleState) {
+					state.PauseReason = reason
+					state.ReconnectAttempt, state.ReconnectMax, state.ReconnectNextAt = 0, 0, 0
+					state.ReconnectExhausted, state.ReconnectLastError = false, ""
+				})
+				// Another actor may already hold a barrier here. Reinstall the
+				// requested cause while concMu is held rather than assuming the
+				// existing barrier carries the right reason.
+				s.engine.Pause(t.ID, pauseCause)
+				out.Paused, out.Status = true, "paused"
+				return out, nil
+			}
 			return out, fmt.Errorf("task is already paused")
 		}
 		wasQueued := lifecycle.Queued

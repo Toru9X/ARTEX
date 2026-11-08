@@ -66,6 +66,16 @@ type Server struct {
 	// servers leave it nil and use probeEgress directly.
 	proxyProbe func(context.Context, string, string, []string, time.Duration) egressProbeResult
 
+	// Proxy pool / auto-resume supervisors.
+	proxyReconnect    proxyReconnectSupervisor
+	proxyPoolWake     chan struct{}
+	proxyPoolWG       sync.WaitGroup
+	proxyPoolProbeSem chan struct{}
+	proxyPoolTickMu   sync.Mutex
+	// scheduleMu serialises the pause/resume transitions the proxy supervisor
+	// drives, so a resume cannot interleave with a concurrent pause.
+	scheduleMu sync.Mutex
+
 	// concMu serializes concurrency-cap decisions (admission + reconcile) so a
 	// scheduler tick and an HTTP settings change / task creation can't both count
 	// free slots off the same snapshot and over-promote past the limit.
@@ -168,6 +178,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
+		proxyPoolWake: make(chan struct{}, 1), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency),
 		profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1),
@@ -192,6 +203,13 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	})
 	// Global readiness (Ready()/llm_configured): a global active LLM provider is
 	// installed. Task-level runnability is separate (ReadyFor → the resolver above).
+	// The proxy pause takes this mutex so it can install the Engine barrier
+	// before a concurrent user pause observes the new paused state.
+	m.SetTaskControlMutex(&s.concMu)
+	s.engine.SetProxyFailureHandler(s.handleProxyFailure)
+	if m.traffic != nil {
+		m.traffic.SetUpstreamFailureHandler(s.handleProxyTrafficFailure)
+	}
 	s.engine.SetReadiness(func() bool {
 		s.cfgMu.Lock()
 		defer s.cfgMu.Unlock()
@@ -1573,12 +1591,12 @@ type createTaskReq struct {
 	CategoryID           *int64   `json:"category_id,omitempty"`
 	Description          string   `json:"description"`
 	Goal                 string   `json:"goal"`
-	LLMProfileID         *int64   `json:"llm_profile_id,omitempty"`    // the LLM profile to run this task on; omitted/null = use the active profile
-	LLMProfileIDs        []int64  `json:"llm_profile_ids,omitempty"`   // ordered task-level profile chain; the first entry takes effect initially
-	SourceTaskIDs        []string `json:"source_task_ids,omitempty"`   // direct, read-only inherited source tasks
-	CompanyIDs           []int64  `json:"company_ids,omitempty"`       // links the company scope and snapshots its current assets; does not copy assets or force intent generation
+	LLMProfileID         *int64   `json:"llm_profile_id,omitempty"`  // the LLM profile to run this task on; omitted/null = use the active profile
+	LLMProfileIDs        []int64  `json:"llm_profile_ids,omitempty"` // ordered task-level profile chain; the first entry takes effect initially
+	SourceTaskIDs        []string `json:"source_task_ids,omitempty"` // direct, read-only inherited source tasks
+	CompanyIDs           []int64  `json:"company_ids,omitempty"`     // links the company scope and snapshots its current assets; does not copy assets or force intent generation
 	TimeoutSeconds       int      `json:"timeout_seconds"`
-	LLMRotate            *bool    `json:"llm_rotate"`             // task-level timeout (seconds); 0/omitted = no limit
+	LLMRotate            *bool    `json:"llm_rotate"`                  // task-level timeout (seconds); 0/omitted = no limit
 	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner heartbeat interval (seconds); 0/omitted = default 600 (10min); floor = default = 600, lower values are raised to 600
 	PlanQuietMode        *bool    `json:"plan_quiet_mode,omitempty"`   // planner quiet-mode switch (#86); omitted = default on; false = edge rounds always plan
 	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // issue one seed intent at creation (content = description + goal) so a worker can start right away without waiting for the first planner round; omitted/null = default off, the standard plan-then-execute flow. Pass true explicitly to enable (for CTF tasks often solved in one work, this skips the pre-start planner round).
@@ -3483,6 +3501,23 @@ func (s *Server) settingsPayload() map[string]any {
 		// and whether the navbar displays the current exit IP.
 		"egress_probe_url": s.m.EgressProbeURL(),
 		"show_egress_ip":   s.m.ShowEgressIP(),
+		// Proxy pool: rotation policy, health policy and auto-resume cadence.
+		// The entries themselves live under /api/settings/proxy-pool.
+		"proxy_rotate_timed_enabled":    s.m.pg.GetBool(settingProxyRotateTimed, false),
+		"proxy_rotate_interval_seconds": proxyIntSetting(s.m.pg, settingProxyRotateInterval, defaultProxyRotateInterval),
+		"proxy_rotate_on_failure":       s.m.pg.GetBool(settingProxyRotateFailure, false),
+		"proxy_rotate_strategy": func() string {
+			v, ok, _ := s.m.pg.GetSetting(settingProxyRotateStrategy)
+			if ok && (v == "random" || v == "sequential") {
+				return v
+			}
+			return "sequential"
+		}(),
+		"proxy_health_fail_threshold":         proxyIntSetting(s.m.pg, settingProxyHealthThreshold, defaultProxyHealthThreshold),
+		"proxy_health_cooldown_seconds":       proxyIntSetting(s.m.pg, settingProxyHealthCooldown, defaultProxyHealthCooldown),
+		"proxy_health_check_interval_seconds": proxyIntSetting(s.m.pg, settingProxyHealthInterval, defaultProxyHealthInterval),
+		"proxy_reconnect_max_attempts":        func() int { n, _ := s.proxyReconnectConfig(); return n }(),
+		"proxy_reconnect_interval_seconds":    func() int { _, d := s.proxyReconnectConfig(); return int(d / time.Second) }(),
 		// Vulnerability IM push global settings. Channels are standalone resources managed via /api/notify/*;
 		// only the three items that "apply to all channels" live here.
 		"notify_enabled":             s.m.pg.GetBool(settingNotifyEnabled, true),
@@ -3560,6 +3595,16 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		// Egress probe settings; read on every probe, so they apply without a restart.
 		EgressProbeURL *string `json:"egress_probe_url"`
 		ShowEgressIP   *bool   `json:"show_egress_ip"`
+		// Proxy pool rotation / health policy and auto-resume cadence.
+		ProxyRotateTimed       *bool   `json:"proxy_rotate_timed_enabled"`
+		ProxyRotateInterval    *int    `json:"proxy_rotate_interval_seconds"`
+		ProxyRotateFailure     *bool   `json:"proxy_rotate_on_failure"`
+		ProxyRotateStrategy    *string `json:"proxy_rotate_strategy"`
+		ProxyHealthThreshold   *int    `json:"proxy_health_fail_threshold"`
+		ProxyHealthCooldown    *int    `json:"proxy_health_cooldown_seconds"`
+		ProxyHealthInterval    *int    `json:"proxy_health_check_interval_seconds"`
+		ProxyReconnectMax      *int    `json:"proxy_reconnect_max_attempts"`
+		ProxyReconnectInterval *int    `json:"proxy_reconnect_interval_seconds"`
 		// Vulnerability IM push global settings. The delivery engine re-reads all three every round, so changes
 		// take effect immediately with no agent rebuild or restart.
 		NotifyEnabled    *bool   `json:"notify_enabled"`
@@ -3594,6 +3639,51 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		if err := s.m.SetOpsec(*req.OpsecEnabled); err != nil {
 			writeErr(w, 500, err.Error())
 			return
+		}
+	}
+	if req.ProxyReconnectMax != nil || req.ProxyReconnectInterval != nil {
+		if err := s.setProxyReconnectSettings(req.ProxyReconnectMax, req.ProxyReconnectInterval); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
+	if req.ProxyRotateTimed != nil || req.ProxyRotateInterval != nil || req.ProxyRotateFailure != nil || req.ProxyRotateStrategy != nil ||
+		req.ProxyHealthThreshold != nil || req.ProxyHealthCooldown != nil || req.ProxyHealthInterval != nil {
+		// Read-modify-write the whole policy: SetProxyPoolSettings validates and
+		// persists it as one unit, so a partial patch must start from the
+		// current values rather than from zeroes.
+		timed, interval, onFailure, strategy := s.m.proxyRotateConfig()
+		threshold, cooldown, healthInterval := s.m.proxyHealthConfig()
+		if req.ProxyRotateTimed != nil {
+			timed = *req.ProxyRotateTimed
+		}
+		if req.ProxyRotateInterval != nil {
+			interval = time.Duration(*req.ProxyRotateInterval) * time.Second
+		}
+		if req.ProxyRotateFailure != nil {
+			onFailure = *req.ProxyRotateFailure
+		}
+		if req.ProxyRotateStrategy != nil {
+			strategy = strings.TrimSpace(*req.ProxyRotateStrategy)
+		}
+		if req.ProxyHealthThreshold != nil {
+			threshold = *req.ProxyHealthThreshold
+		}
+		if req.ProxyHealthCooldown != nil {
+			cooldown = time.Duration(*req.ProxyHealthCooldown) * time.Second
+		}
+		if req.ProxyHealthInterval != nil {
+			healthInterval = time.Duration(*req.ProxyHealthInterval) * time.Second
+		}
+		if err := s.m.SetProxyPoolSettings(timed, int(interval/time.Second), onFailure, strategy, threshold, int(cooldown/time.Second), int(healthInterval/time.Second)); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		// Wake the supervisor so a shortened interval takes effect now rather
+		// than after the previous, longer sleep expires.
+		select {
+		case s.proxyPoolWake <- struct{}{}:
+		default:
 		}
 	}
 	if req.EgressProbeURL != nil {
