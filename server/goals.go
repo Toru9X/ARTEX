@@ -10,6 +10,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"time"
 )
 
 type goalSpec struct {
@@ -107,8 +108,21 @@ func (s *Server) admitPausedTask(t *Task) (queued bool, err error) {
 	return s.admitTaskWhen(t, "resume", true)
 }
 
+// admitScheduledTask resumes a task because its calendar window opened. It is
+// not a manual override, so it must not suspend the calendar for that task.
+func (s *Server) admitScheduledTask(t *Task) (queued bool, err error) {
+	return s.admitTaskWhenScoped(t, "resume", true, "", 0, false, false, true)
+}
+
 func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued bool, err error) {
 	return s.admitTaskWhenGuarded(t, mode, requirePaused, "", 0, false)
+}
+
+// admitTaskWhenAuto is admitTaskWhenGuarded for an automatic resume: it keeps
+// the calendar hold, because the supervisor that triggered it did not override
+// the schedule the way an operator would.
+func (s *Server) admitTaskWhenAuto(t *Task, mode string, requirePaused bool, requiredReason string, requiredGeneration uint64, checkGeneration bool) (queued bool, err error) {
+	return s.admitTaskWhenScoped(t, mode, requirePaused, requiredReason, requiredGeneration, checkGeneration, true, false)
 }
 
 // admitTaskWhenGuarded is admitTaskWhen with the two guards the proxy
@@ -119,11 +133,23 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 // paused again since. Both are evaluated under concMu, next to the other
 // pre-admission checks, so the decision cannot race a concurrent transition.
 func (s *Server) admitTaskWhenGuarded(t *Task, mode string, requirePaused bool, requiredReason string, requiredGeneration uint64, checkGeneration bool) (queued bool, err error) {
+	return s.admitTaskWhenScoped(t, mode, requirePaused, requiredReason, requiredGeneration, checkGeneration, false, false)
+}
+
+func (s *Server) admitTaskWhenScoped(t *Task, mode string, requirePaused bool, requiredReason string, requiredGeneration uint64, checkGeneration, preserveSchedule, scheduled bool) (queued bool, err error) {
 	if t == nil {
 		return false, fmt.Errorf("task not found")
 	}
 	if mode != "bootstrap" {
 		mode = "resume"
+	}
+	// A manual resume overrides the calendar for this task until the current
+	// window ends; take scheduleMu first, in the same order the calendar tick
+	// does, so the override commits before another tick can re-pause the task.
+	manualSchedule := requirePaused && !scheduled && !preserveSchedule
+	if manualSchedule {
+		s.scheduleMu.Lock()
+		defer s.scheduleMu.Unlock()
 	}
 	s.concMu.Lock()
 	defer s.concMu.Unlock()
@@ -154,6 +180,12 @@ func (s *Server) admitTaskWhenGuarded(t *Task, mode string, requirePaused bool, 
 		}
 		mode = s.resumeAdmissionMode(t)
 	}
+	var manualUntil *time.Time
+	if manualSchedule {
+		if manualUntil, err = s.taskManualScheduleEnd(t.ID, time.Now()); err != nil {
+			return false, err
+		}
+	}
 	wasTerminal := isTerminalStatus(lifecycle.Status)
 	wasPaused := lifecycle.Paused || s.engine.IsPaused(t.ID)
 	wasQueued := lifecycle.Queued
@@ -168,7 +200,7 @@ func (s *Server) admitTaskWhenGuarded(t *Task, mode string, requirePaused bool, 
 	// status: a concurrent terminal transition must win instead of being silently
 	// reported as a successful follow-up admission.
 	if !wasTerminal && !wasPaused && !wasQueued && s.engine.Started(t.ID) && (!enabled || ready) {
-		if err := s.m.ApplyTaskAdmission(t.ID, lifecycle.Status, lifecycle.Status, false, "resume", false); err != nil {
+		if err := s.m.applyTaskAdmissionWithSchedule(t.ID, lifecycle.Status, lifecycle.Status, false, "resume", false, manualUntil, preserveSchedule); err != nil {
 			return false, err
 		}
 		s.startAdmittedTask(t, "resume")
@@ -202,7 +234,7 @@ func (s *Server) admitTaskWhenGuarded(t *Task, mode string, requirePaused bool, 
 	if wasTerminal {
 		status = "running"
 	}
-	if err := s.m.ApplyTaskAdmission(t.ID, lifecycle.Status, status, shouldQueue, mode, wasQueued); err != nil {
+	if err := s.m.applyTaskAdmissionWithSchedule(t.ID, lifecycle.Status, status, shouldQueue, mode, wasQueued, manualUntil, preserveSchedule); err != nil {
 		if !engineWasPaused && !wasPaused && !wasQueued {
 			s.engine.Resume(t)
 		}

@@ -1341,6 +1341,14 @@ func (m *Manager) SetTaskPaused(id string, paused bool) error {
 // admission keeps its FIFO timestamp; a task that was explicitly paused and is
 // now re-queued receives a fresh tail position.
 func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued bool, mode string, preservePosition bool) error {
+	return m.applyTaskAdmissionWithSchedule(id, expectedStatus, status, queued, mode, preservePosition, nil, false)
+}
+
+// applyTaskAdmissionWithSchedule is ApplyTaskAdmission with control over the
+// calendar hold. A manual resume clears it — the operator overrode the
+// calendar. An automatic one (the proxy supervisor) must preserve it, or
+// recovering a proxy would silently cancel a window that is still closed.
+func (m *Manager) applyTaskAdmissionWithSchedule(id, expectedStatus, status string, queued bool, mode string, preservePosition bool, manualUntil *time.Time, preserveSchedule bool) error {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
@@ -1364,6 +1372,8 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 	        ELSE NULL
 	    END,
 	    paused=false, pause_reason='',
+	    schedule_paused=CASE WHEN $8::boolean THEN schedule_paused ELSE false END,
+	    schedule_manual_until=CASE WHEN $8::boolean THEN schedule_manual_until ELSE COALESCE($7::timestamptz, schedule_manual_until) END,
 	    queued=$3,
 	    queued_at=CASE
 	        WHEN NOT $3 THEN NULL
@@ -1388,7 +1398,7 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 	    END,
 	    paused_at=NULL
 	WHERE id=$1 AND deleted_at IS NULL AND status=$6
-	RETURNING queued_at, queue_mode, completed_at, first_run_at, deadline_at`, n, status, queued, mode, preservePosition, expectedStatus).
+	RETURNING queued_at, queue_mode, completed_at, first_run_at, deadline_at`, n, status, queued, mode, preservePosition, expectedStatus, manualUntil, preserveSchedule).
 		Scan(&queuedAt, &committedMode, &completedAt, &firstRunAt, &deadlineAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("task %s lifecycle changed before admission (expected status %q)", id, expectedStatus)
@@ -1436,6 +1446,13 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 // bootstrap task still performs goal decomposition, but the next enqueue receives
 // a new queued_at timestamp and therefore moves to the FIFO tail.
 func (m *Manager) ApplyTaskPause(id string) error {
+	return m.ApplyTaskPauseReason(id, "paused_by_user", false)
+}
+
+// ApplyTaskPauseReason is ApplyTaskPause with an explicit cause. scheduled
+// marks the pause as calendar-owned, which is what lets a later window resume
+// it — a manual pause is never lifted automatically.
+func (m *Manager) ApplyTaskPauseReason(id, reason string, scheduled bool) error {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
@@ -1444,12 +1461,12 @@ func (m *Manager) ApplyTaskPause(id string) error {
 	}
 	var mode string
 	err = m.pg.QueryRow(`UPDATE tasks
-		SET paused=true, pause_reason='paused_by_user', queued=false, queued_at=NULL, paused_at=now(),
+		SET paused=true, pause_reason=$3, schedule_paused=$2, schedule_manual_until=NULL, queued=false, queued_at=NULL, paused_at=now(),
 		    active_run_seconds=active_run_seconds + CASE WHEN run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END,
 		    run_segment_started_at=NULL
 		WHERE id=$1 AND deleted_at IS NULL AND paused=false
 		  AND status NOT IN ('done','failed','timeout')
-		RETURNING COALESCE(queue_mode,'')`, n).Scan(&mode)
+		RETURNING COALESCE(queue_mode,'')`, n, scheduled, reason).Scan(&mode)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("task %s is unavailable for pause", id)
 	}
@@ -1460,7 +1477,7 @@ func (m *Manager) ApplyTaskPause(id string) error {
 	if t := m.tasks[id]; t != nil {
 		t.updateLifecycle(func(state *taskLifecycleState) {
 			state.Paused = true
-			state.PauseReason = "paused_by_user"
+			state.PauseReason = reason
 			state.Queued = false
 			state.QueuedAt = 0
 			state.QueueMode = mode
@@ -1659,6 +1676,38 @@ func (m *Manager) SetWorkerPools(pools []WorkerPool) error {
 		return err
 	}
 	return m.pg.SetSetting(settingWorkerPools, string(raw))
+}
+
+// ConvertProxyPauseToSchedule records that a calendar window ended while a
+// task was waiting for proxy recovery. The Engine pause barrier is preserved
+// and proxy auto-resume eligibility is dropped, so the task waits for its next
+// window instead of resuming the moment the proxy returns.
+func (m *Manager) ConvertProxyPauseToSchedule(id string) error {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	res, err := m.pg.Exec(`UPDATE tasks SET pause_reason='paused_by_schedule', schedule_paused=true
+		WHERE id=$1 AND paused=true AND pause_reason='paused_by_proxy' AND status NOT IN ('done','failed','timeout')`, n)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return nil
+	}
+	m.mu.RLock()
+	t := m.tasks[id]
+	m.mu.RUnlock()
+	if t != nil {
+		t.updateLifecycle(func(v *taskLifecycleState) {
+			v.PauseReason = "paused_by_schedule"
+			v.ReconnectAttempt, v.ReconnectMax, v.ReconnectNextAt = 0, 0, 0
+			v.ReconnectExhausted, v.ReconnectLastError = false, ""
+		})
+	}
+	return nil
 }
 
 // SetTaskControlMutex attaches the Server's task-control mutex; see controlMu.

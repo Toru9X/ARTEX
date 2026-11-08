@@ -23,6 +23,10 @@ type Scheduler struct {
 	s    *Server
 	pg   *db.DB
 	tick time.Duration
+	// startedAt is this process's start. A schedule whose window opened before
+	// the process did must not be treated as a fresh transition on the first
+	// tick, or every restart would re-fire every open window.
+	startedAt time.Time
 }
 
 const (
@@ -34,7 +38,7 @@ const (
 )
 
 func newScheduler(s *Server) *Scheduler {
-	return &Scheduler{s: s, pg: s.m.pg, tick: 5 * time.Second}
+	return &Scheduler{s: s, pg: s.m.pg, tick: 5 * time.Second, startedAt: time.Now()}
 }
 
 // Run loops until ctx is done, ticking the scheduler. Started once from server New.
@@ -115,6 +119,9 @@ func (sc *Scheduler) init() {
 }
 
 func (sc *Scheduler) step() {
+	// Calendar windows are independent of agent triggers, so they run before
+	// the early return below: a deployment with no triggers still schedules.
+	sc.fireTaskSchedules()
 	triggers, err := sc.pg.ListEnabledTriggers()
 	if err != nil {
 		return

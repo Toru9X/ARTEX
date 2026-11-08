@@ -37,6 +37,7 @@ import type {
   EvidenceBodyPreview,
   EgressReport,
   ProxyPoolEntry,
+  TaskSchedule,
   ProxySwitchLog,
   ExplorationNodePage,
   ExplorationNodeQuery,
@@ -218,6 +219,39 @@ const arr = <T>(x: T[] | null | undefined): T[] => x ?? [];
 // the initial load, import and health-check refreshes.
 function normalizeProxyPool<T extends { entries: ProxyPoolEntry[]; switch_log: ProxySwitchLog[] }>(pool: T): T {
   return { ...pool, entries: arr(pool.entries), switch_log: arr(pool.switch_log) };
+}
+
+export type ScheduleInput = {
+  name: string;
+  enabled?: boolean;
+  timezone_mode?: "beijing" | "system";
+  schedule_type: "once" | "weekly";
+  run_date?: string;
+  end_date?: string;
+  weekdays?: number[];
+  start_time: string;
+  end_time?: string;
+  start_immediately?: boolean;
+  task_ids: number[];
+};
+
+// schedulePayload fills every optional field explicitly: the server treats an
+// absent key and an empty value differently on update, and omitting one would
+// silently keep the previous value.
+function schedulePayload(input: ScheduleInput) {
+  return {
+    name: input.name,
+    enabled: input.enabled ?? true,
+    timezone_mode: input.timezone_mode ?? "system",
+    schedule_type: input.schedule_type,
+    run_date: input.run_date ?? "",
+    end_date: input.end_date ?? "",
+    weekdays: input.weekdays ?? [],
+    start_time: input.start_time,
+    end_time: input.end_time ?? "",
+    start_immediately: input.start_immediately ?? false,
+    task_ids: input.task_ids,
+  };
 }
 
 const tq = (task?: string, sep: "?" | "&" = "?") => (task ? `${sep}task=${encodeURIComponent(task)}` : "");
@@ -847,6 +881,19 @@ export const api = {
   // omitted = the saved address, "" = the built-in defaults, set = a temporary override.
   testEgressProxy: (patch: { global_proxy?: string; probe_url?: string }) =>
     post<EgressReport>(`/settings/proxy/test`, patch),
+
+  // ---- Task schedules ----
+  schedules: () => get<{ schedules: TaskSchedule[] }>("/schedules").then((r) => arr(r.schedules)),
+  schedule: (id: number) => get<TaskSchedule>(`/schedules/${id}`),
+  createSchedule: (input: ScheduleInput) => post<TaskSchedule>("/schedules", schedulePayload(input)),
+  updateSchedule: (id: number, input: ScheduleInput) => patch<TaskSchedule>(`/schedules/${id}`, schedulePayload(input)),
+  deleteSchedule: (id: number) => del<{ ok: boolean }>(`/schedules/${id}`),
+  renameSchedule: (id: number, name: string) => patch<TaskSchedule>(`/schedules/${id}/metadata`, { name }),
+  updateScheduleRemark: (id: number, remark: string) => patch<TaskSchedule>(`/schedules/${id}/remark`, { remark }),
+  pauseSchedule: (id: number) => post<{ ok: boolean }>(`/schedules/${id}/pause`, {}),
+  resumeSchedule: (id: number) => post<{ ok: boolean }>(`/schedules/${id}/resume`, {}),
+  runScheduleNow: (id: number) =>
+    post<{ ok: boolean; started: number; errors?: string[] }>(`/schedules/${id}/run-now`, {}),
 
   // ---- Proxy pool ----
   proxyPool: () =>

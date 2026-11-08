@@ -1508,3 +1508,69 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS run_segment_started_at TIMESTAMPTZ;
 -- stays unconstrained so a direct edit cannot make a row unreadable.
 ALTER TABLE tasks          ADD COLUMN IF NOT EXISTS worker_count INT NOT NULL DEFAULT 0;
 ALTER TABLE task_templates ADD COLUMN IF NOT EXISTS worker_count INT NOT NULL DEFAULT 0;
+
+-- =====================================================================
+-- Task schedules: calendar windows that start and pause bound tasks.
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS task_schedules (
+    id                 BIGSERIAL PRIMARY KEY,
+    name               TEXT NOT NULL,
+    remark             TEXT NOT NULL DEFAULT '',
+    enabled            BOOLEAN NOT NULL DEFAULT true,
+    timezone_mode      TEXT NOT NULL DEFAULT 'system'
+                       CHECK (timezone_mode IN ('beijing','system')),
+    schedule_type      TEXT NOT NULL DEFAULT 'weekly'
+                       CHECK (schedule_type IN ('once','weekly')),
+    run_date           DATE,
+    end_date           DATE,
+    weekdays           TEXT NOT NULL DEFAULT '',
+    start_time         TIME NOT NULL,
+    end_time           TIME,
+    start_immediately  BOOLEAN NOT NULL DEFAULT false,
+    status             TEXT NOT NULL DEFAULT 'waiting'
+                       CHECK (status IN ('waiting','running','outside','completed','error','paused')),
+    last_window_key    TEXT NOT NULL DEFAULT '',
+    last_transition_at TIMESTAMPTZ,
+    last_error         TEXT NOT NULL DEFAULT '',
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- A one-off needs its date; a weekly schedule needs weekdays instead.
+    CHECK ((schedule_type = 'once' AND run_date IS NOT NULL) OR
+           (schedule_type = 'weekly' AND run_date IS NULL)),
+    CHECK ((schedule_type = 'once') OR weekdays <> '')
+);
+CREATE INDEX IF NOT EXISTS idx_task_schedules_enabled ON task_schedules(enabled, id);
+ALTER TABLE task_schedules ADD COLUMN IF NOT EXISTS end_date DATE;
+ALTER TABLE task_schedules ADD COLUMN IF NOT EXISTS remark TEXT NOT NULL DEFAULT '';
+DROP TRIGGER IF EXISTS trg_task_schedules_upd ON task_schedules;
+CREATE TRIGGER trg_task_schedules_upd BEFORE UPDATE ON task_schedules
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS task_schedule_tasks (
+    schedule_id        BIGINT NOT NULL REFERENCES task_schedules(id) ON DELETE CASCADE,
+    task_id            BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    paused_by_schedule BOOLEAN NOT NULL DEFAULT false,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (schedule_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_schedule_tasks_task ON task_schedule_tasks(task_id);
+ALTER TABLE task_schedule_tasks ADD COLUMN IF NOT EXISTS paused_by_schedule BOOLEAN NOT NULL DEFAULT false;
+
+-- schedule_paused marks a task parked because its window closed; a calendar
+-- may only resume what it paused itself, never a manual pause.
+-- schedule_manual_until suspends the calendar for a task the operator started
+-- by hand, until the end of the current window.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS schedule_paused       BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS schedule_manual_until TIMESTAMPTZ;
+UPDATE tasks SET pause_reason='paused_by_schedule' WHERE paused AND schedule_paused AND pause_reason='';
+
+CREATE TABLE IF NOT EXISTS task_schedule_history (
+    id          BIGSERIAL PRIMARY KEY,
+    schedule_id BIGINT NOT NULL REFERENCES task_schedules(id) ON DELETE CASCADE,
+    task_id     BIGINT,
+    action      TEXT NOT NULL,
+    success     BOOLEAN NOT NULL,
+    message     TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_schedule_history_sched ON task_schedule_history(schedule_id, id DESC);

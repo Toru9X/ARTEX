@@ -30,6 +30,12 @@ export function RemarkEditor(props: EditorProps) {
   );
 }
 
+// A schedule name must stay non-empty, so it uses the single-line variant with
+// its own empty check rather than the remark rules.
+export function ScheduleNameEditor(props: EditorProps) {
+  return <InlineTextEditor {...props} multiline={false} fieldName="name" maxCharacters={200} emptyLabel="Untitled" />;
+}
+
 function InlineTextEditor({
   value = "",
   label,

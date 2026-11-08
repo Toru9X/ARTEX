@@ -357,11 +357,24 @@ func (s *Server) proxyReconnectSuccessWithGuards(guards map[string]proxyReconnec
 		if !proxyReconnectGuardMatches(t.lifecycleSnapshot(), guard) {
 			continue
 		}
-		// The calendar-window gate belongs to the task-schedule feature; until
-		// that exists, a recovered proxy always resumes immediately.
+		// A recovered proxy must not resume a task whose calendar window has
+		// closed in the meantime; hand it to the schedule instead.
+		if s.m.pg != nil {
+			inside, scheduleErr := s.proxyResumeInsideSchedule(t.ID, time.Now())
+			if scheduleErr != nil {
+				log.Printf("[proxy] schedule gate for task %s: %v", t.ID, scheduleErr)
+				continue
+			}
+			if !inside {
+				if err := s.m.ConvertProxyPauseToSchedule(t.ID); err != nil {
+					log.Printf("[proxy] schedule pause task %s: %v", t.ID, err)
+				}
+				continue
+			}
+		}
 		var err error
 		if s.engine != nil {
-			_, err = s.admitTaskWhenGuarded(t, "resume", true, "paused_by_proxy", guard.generation, true)
+			_, err = s.admitTaskWhenAuto(t, "resume", true, "paused_by_proxy", guard.generation, true)
 			if afterAdmission != nil {
 				afterAdmission()
 			}

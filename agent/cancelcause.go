@@ -31,6 +31,8 @@ var (
 		"The user paused the task via the task control API (POST /api/tasks/{id}/control, action=pause). This Planner/Worker run was actively cancelled; running intents return to frontier(open) and are re-claimed and executed from scratch after the task resumes")
 	AbortPausedByOrchestrator = cause("paused_by_orchestrator", "The orchestrating agent paused the task",
 		"The orchestrating agent called the pause_task tool to pause this task. This Planner/Worker run was actively cancelled; running intents return to frontier(open) and are executed again after resuming")
+	AbortPausedBySchedule = cause("paused_by_schedule", "The schedule window closed; task paused",
+		"The task's calendar window ended, so this execution stopped. The task resumes automatically at the start of its next window")
 	AbortPausedByProxy = cause("paused_by_proxy", "The global proxy failed; task paused",
 		"The global egress proxy could not be reached, so the task was paused. The proxy supervisor keeps probing and resumes the task automatically once the proxy recovers")
 	AbortTaskDeleted = cause("task_deleted", "The task was deleted",

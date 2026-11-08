@@ -10,7 +10,6 @@ import (
 	"github.com/Autumn-27/artex/agent"
 )
 
-
 func TestProxyFailureClassification(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -459,5 +458,36 @@ func TestProxyReconnectSettingsSuccessGuardsGenerationZero(t *testing.T) {
 	}
 	if after.ReconnectGeneration != before.ReconnectGeneration || after.ReconnectNextAt != before.ReconnectNextAt || after.ReconnectLastError != before.ReconnectLastError {
 		t.Fatalf("generation-zero stale settings success wiped state: before=%+v after=%+v", before, after)
+	}
+}
+
+// An automatic proxy resume must leave the calendar state alone: the window
+// that paused the task may still be closed, and clearing schedule_paused here
+// would silently cancel it.
+func TestProxyAdmissionPreservesCalendarOverride(t *testing.T) {
+	m := proxyTestManager(t)
+	task, err := m.CreateTask("calendar proxy", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = m.DeleteTask(task.ID, DeleteTaskOptions{}) }()
+	if _, err := m.pg.Exec(`UPDATE tasks SET schedule_paused=true, schedule_manual_until='2099-01-01 00:00:00+00' WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ApplyProxyPause(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := newAdmissionTestServer(m, nil)
+	s.engine.Pause(task.ID, agent.AbortPausedByProxy)
+	if queued, err := s.admitTaskWhenAuto(task, "resume", true, "paused_by_proxy", 0, false); err != nil || queued {
+		t.Fatalf("proxy admission queued=%v err=%v", queued, err)
+	}
+	var schedulePaused bool
+	var manualUntil time.Time
+	if err := m.pg.QueryRow(`SELECT schedule_paused, schedule_manual_until FROM tasks WHERE id=$1`, task.ID).Scan(&schedulePaused, &manualUntil); err != nil {
+		t.Fatal(err)
+	}
+	if !schedulePaused || !manualUntil.Equal(time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("proxy admission changed calendar state: paused=%v until=%v", schedulePaused, manualUntil)
 	}
 }

@@ -118,7 +118,7 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 			// A task already paused by the proxy supervisor can still be taken
 			// over by a user or orchestrator pause: that ends auto-resume
 			// eligibility, so a recovering proxy must not revive it later.
-			if lifecycle.PauseReason == "paused_by_proxy" {
+			if lifecycle.PauseReason == "paused_by_proxy" && pauseCause != agent.AbortPausedBySchedule {
 				if pauseCause == nil {
 					pauseCause = agent.AbortPausedByUser
 				}
@@ -149,7 +149,15 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 			pauseCause = agent.AbortPausedByUser
 		}
 		s.engine.Pause(t.ID, pauseCause)
-		if err := s.m.ApplyTaskPause(t.ID); err != nil {
+		reason, scheduled := "paused_by_user", false
+		switch pauseCause {
+		case agent.AbortPausedByOrchestrator:
+			reason = "paused_by_orchestrator"
+		case agent.AbortPausedBySchedule:
+			// Only a calendar-owned pause may be lifted by a later window.
+			reason, scheduled = "paused_by_schedule", true
+		}
+		if err := s.m.ApplyTaskPauseReason(t.ID, reason, scheduled); err != nil {
 			if !wasEnginePaused && !wasQueued {
 				s.engine.Resume(t)
 			}
@@ -162,7 +170,13 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 		out.Paused, out.Status = true, "paused"
 		go s.reconcileConcurrency()
 	case "resume":
-		queued, err := s.admitPausedTask(t)
+		// A calendar-driven resume is not an operator override, so it must not
+		// suspend the schedule for this task.
+		admit := s.admitPausedTask
+		if pauseCause == agent.AbortPausedBySchedule {
+			admit = s.admitScheduledTask
+		}
+		queued, err := admit(t)
 		if err != nil {
 			return out, err
 		}

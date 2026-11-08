@@ -1383,6 +1383,42 @@ export interface ProxySwitchLog {
   reason: string;
 }
 
+// ---- Task schedules ----
+// A calendar window that starts bound tasks when it opens and pauses them when
+// it closes. The server owns the clock; the UI only renders its decisions.
+export interface TaskSchedule {
+  id: number;
+  name: string;
+  remark?: string;
+  enabled: boolean;
+  timezone_mode: "beijing" | "system";
+  timezone?: string;
+  schedule_type: "once" | "weekly";
+  run_date?: string;
+  end_date?: string;
+  weekdays: number[];
+  start_time: string;
+  end_time?: string;
+  start_immediately: boolean;
+  status: "waiting" | "running" | "outside" | "completed" | "error" | "paused";
+  last_window_key?: string;
+  last_transition_at?: string;
+  last_error?: string;
+  next_start?: string;
+  next_end?: string;
+  run_count?: number;
+  last_run_at?: string;
+  task_ids: number[];
+  history?: Array<{
+    id: number;
+    task_id?: number;
+    action: string;
+    success: boolean;
+    message: string;
+    created_at: string;
+  }>;
+}
+
 // ---- Intercept Rules ----
 export type InterceptAction = "allow" | "deny" | "ask";
 export type InterceptMatchTarget = "tool_name" | "tool_input";
