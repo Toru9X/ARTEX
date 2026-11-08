@@ -17,6 +17,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/sidequestion"
+	"github.com/Autumn-27/norma/llm"
 )
 
 const (
@@ -446,6 +447,62 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 			title = "Message with attachments"
 		}
 		_ = pg.RenameConversation(c.ID, title)
+		if s.m.pg.GetBool(db.SettingChatAutoTitle, false) {
+			// The preview title is written first so the thread is never blank; the
+			// model's title replaces it later, and only if nobody renamed it since.
+			conversationID := c.ID
+			agentKey := c.AgentKey
+			pinnedProfile := c.LLMProfileID
+			promptContent := msg
+			if len(req.Attachments) > 0 {
+				var names []string
+				for _, attachment := range req.Attachments {
+					if name := strings.TrimSpace(attachment.Name); name != "" {
+						names = append(names, name)
+					}
+				}
+				if len(names) > 0 {
+					if promptContent != "" {
+						promptContent += "\n"
+					}
+					promptContent += "attachments: " + strings.Join(names, ", ")
+				}
+			}
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				profileID := s.effectiveProfileForAgent(agentKey, pinnedProfile)
+				var prov llm.Provider
+				providerOK := false
+				if profileID != nil {
+					prov, _, providerOK = s.providerForProfile(*profileID)
+				}
+				if !providerOK {
+					if active, activeErr := s.m.pg.ActiveProfile(); activeErr == nil && active != nil {
+						profileID = &active.ID
+						prov, _, providerOK = s.providerForProfile(active.ID)
+					} else if activeErr != nil {
+						log.Printf("[auto-title] conversation %d active profile lookup failed: %v", conversationID, activeErr)
+					}
+				}
+				if profileID == nil || !providerOK || prov == nil {
+					log.Printf("[auto-title] conversation %d: no effective profile", conversationID)
+					return
+				}
+				generated, err := agent.GenerateAutoTitle(ctx, prov, promptContent)
+				if err != nil {
+					log.Printf("[auto-title] conversation %d: %v", conversationID, err)
+					return
+				}
+				if !autoTitleIsUsable(generated) {
+					log.Printf("[auto-title] conversation %d: the generated title is empty or a placeholder", conversationID)
+					return
+				}
+				if err := s.m.pg.RenameConversationIfTitle(conversationID, generated, title); err != nil {
+					log.Printf("[auto-title] conversation %d rename failed: %v", conversationID, err)
+				}
+			}()
+		}
 	}
 	_ = pg.TouchConversation(c.ID)
 
@@ -456,6 +513,12 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	baseDir := filepath.Join(s.m.dir, "sessions", busyKey)
 	s.runConversation(c, composeAgentMessage(agentMessage, req.Attachments, baseDir), busyKey, msg)
 	writeJSON(w, 202, map[string]any{"status": "accepted"})
+}
+
+// autoTitleIsUsable rejects an empty or placeholder title, so a failed
+// generation never replaces the message preview with nothing.
+func autoTitleIsUsable(generated string) bool {
+	return generated != "" && generated != "New conversation"
 }
 
 // runConversation runs ONE agent turn on a conversation in a background goroutine

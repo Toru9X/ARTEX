@@ -252,7 +252,7 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			"plan_heartbeat_seconds": map[string]any{"type": "integer", "description": "optional: planner heartbeat interval (seconds). When this much time has passed since the last planning round ended/the task started with no trigger in between → run one planning round (deadlock backstop + wakes the planner to supervise in-flight workers). Empty or 0 = default 600 (10min);"},
 			"seed_first_intent":      map[string]any{"type": "boolean", "description": "optional: enable for simple tasks to issue one seed intent at creation (content = description + goal) so a worker can start testing right away without waiting for the first planner round; default false (the standard plan-then-execute flow)."},
 		}, "description", "goal"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Description          string          `json:"description"`
 				Goal                 string          `json:"goal"`
@@ -306,7 +306,39 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			if pin != nil {
 				llmIDs = []int64{*pin}
 			}
+			// An agent-created task can be named by a small model call, so the task
+			// list is readable; a failure just leaves it unnamed.
+			name := ""
+			if s.m.pg.GetBool(db.SettingTaskAutoTitle, false) {
+				if err := ctx.Err(); err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				active, activeErr := s.m.pg.ActiveProfile()
+				switch {
+				case activeErr != nil:
+					log.Printf("[auto-title] active profile lookup failed: %v", activeErr)
+				case active == nil:
+					log.Printf("[auto-title] no active profile")
+				default:
+					if prov, _, providerOK := s.providerForProfile(active.ID); providerOK {
+						titleCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+						generated, titleErr := agent.GenerateAutoTitle(titleCtx, prov, a.Description+"\n"+a.Goal)
+						cancel()
+						if err := ctx.Err(); err != nil {
+							return actool.Errorf(err.Error()), nil
+						}
+						if titleErr == nil {
+							name = generated
+						} else {
+							log.Printf("[auto-title] task title generation failed: %v", titleErr)
+						}
+					} else {
+						log.Printf("[auto-title] no usable provider for active profile %d", active.ID)
+					}
+				}
+			}
 			t, err := s.m.CreateTaskWithOptions(a.Description, a.Goal, db.TaskCreateOptions{
+				Name:                 name,
 				SourceTaskIDs:        sourceIDs,
 				LLMProfileIDs:        llmIDs,
 				TimeoutSeconds:       a.TimeoutSeconds,

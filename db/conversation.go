@@ -197,6 +197,15 @@ func (d *DB) RenameConversation(id int64, title string) error {
 	return err
 }
 
+// RenameConversationIfTitle renames a thread only while its title is still a
+// placeholder or the message preview. That keeps an asynchronous auto-title
+// write from overwriting a rename the user made in the meantime.
+func (d *DB) RenameConversationIfTitle(id int64, title, initial string) error {
+	_, err := d.Exec(`UPDATE conversations SET title=$2
+WHERE id=$1 AND title IN ('', 'New conversation', $3)`, id, title, initial)
+	return err
+}
+
 // TouchConversation bumps updated_at so the thread floats to the top of the list.
 func (d *DB) TouchConversation(id int64) error {
 	_, err := d.Exec(`UPDATE conversations SET updated_at=now() WHERE id=$1`, id)
