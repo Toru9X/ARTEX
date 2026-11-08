@@ -471,9 +471,27 @@ func (s *Server) interceptGetJudgeConfig(w http.ResponseWriter, r *http.Request)
 
 // interceptSetJudgeConfig persists the judge configuration.
 func (s *Server) interceptSetJudgeConfig(w http.ResponseWriter, r *http.Request) {
-	var req intercept.JudgeConfig
-	if err := decode(r, &req); err != nil {
+	var raw json.RawMessage
+	if err := decode(r, &raw); err != nil {
 		writeErr(w, 400, err.Error())
+		return
+	}
+	var req intercept.JudgeConfig
+	if err := json.Unmarshal(raw, &req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	// An omitted confidence_threshold means "default", not 0 — zero would turn
+	// off the low-confidence escalation entirely.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if _, present := fields["confidence_threshold"]; !present {
+		req.ConfidenceThreshold = 0.55
+	} else if req.ConfidenceThreshold < 0 || req.ConfidenceThreshold > 1 {
+		writeErr(w, 400, "confidence_threshold must be between 0 and 1")
 		return
 	}
 	switch req.FailAction {
@@ -488,8 +506,24 @@ func (s *Server) interceptSetJudgeConfig(w http.ResponseWriter, r *http.Request)
 		writeErr(w, 400, "ask_timeout_action must be allow or deny")
 		return
 	}
+	switch req.IncompleteScriptAction {
+	case "":
+		req.IncompleteScriptAction = intercept.DefaultIncompleteScriptAction
+	case "ask", "model":
+	default:
+		writeErr(w, 400, "incomplete_script_action must be ask or model")
+		return
+	}
+	if err := req.ValidateRetry(); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	if err := s.m.interceptor.SetJudgeConfig(req); err != nil {
-		writeErr(w, 500, err.Error())
+		if strings.Contains(err.Error(), "confidence_threshold") {
+			writeErr(w, 400, err.Error())
+		} else {
+			writeErr(w, 500, err.Error())
+		}
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})

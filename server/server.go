@@ -1093,6 +1093,9 @@ func (s *Server) Handler() http.Handler {
 // with a valid token gets the service name and version; the web UI's top bar
 // reads the version, and sends its token.
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	// A cached health response would let a proxy answer for a server that has
+	// since gone down.
+	w.Header().Set("Cache-Control", "no-store")
 	if !verifyJWT(extractToken(r), s.jwtKey) {
 		writeJSON(w, 200, map[string]any{"ok": true})
 		return

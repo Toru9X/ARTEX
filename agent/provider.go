@@ -336,6 +336,9 @@ func isFalsy(s string) bool {
 // Provider returns the short provider name
 // ("anthropic"/"openai"/"openai-responses"/"ollama").
 func (c Config) Provider() string {
+	if c.Jev {
+		return "jev"
+	}
 	switch c.Format {
 	case llm.FormatOpenAI:
 		return "openai"

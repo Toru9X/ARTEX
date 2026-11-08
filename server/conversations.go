@@ -515,6 +515,13 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, 202, map[string]any{"status": "accepted"})
 }
 
+// autoTitleMayReplace says whether a title is still the placeholder or the
+// message preview, i.e. whether an auto-title may overwrite it. This mirrors
+// the WHERE clause of RenameConversationIfTitle.
+func autoTitleMayReplace(current, initial string) bool {
+	return current == "" || current == "New conversation" || current == initial
+}
+
 // autoTitleIsUsable rejects an empty or placeholder title, so a failed
 // generation never replaces the message preview with nothing.
 func autoTitleIsUsable(generated string) bool {
