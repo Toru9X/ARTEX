@@ -14,8 +14,11 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/intercept/jev"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/llm"
+	"log"
+	"time"
 )
 
 // judgeWorkerLane is the usage-ledger "worker" label for intercept fallback-judge
@@ -41,6 +44,25 @@ func (s *Server) wireInterceptReviewer() {
 		}
 		if profileID == 0 {
 			return intercept.Decision{}, fmt.Errorf("no usable judge model is configured")
+		}
+		profile, err := s.m.pg.ProfileByID(profileID)
+		if err != nil || profile == nil {
+			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("judge model profile %d is unavailable", profileID)
+		}
+		// Jev speaks its own judge protocol, not chat/completions, so it is called
+		// directly here. This has to come before providerForProfile, which refuses
+		// to build a chat provider for a Jev profile.
+		if profile.Format == "jev" {
+			if strings.TrimSpace(profile.APIKey) == "" {
+				return intercept.Decision{ProfileID: profileID}, fmt.Errorf("the Jev judge model has no API key")
+			}
+			ctx = llmrec.WithWorker(ctx, judgeWorkerLane)
+			started := time.Now()
+			decision, usage, reviewErr := (jev.Config{
+				BaseURL: profile.BaseURL, APIKey: profile.APIKey, Model: profile.Model, Proxy: profile.Proxy,
+			}).ReviewWithUsage(ctx, input, prompt, s.m.interceptor.GetJudgeConfig().ConfidenceThreshold, profileID)
+			s.recordJevJudgeUsage(ctx, profile, usage, started, reviewErr)
+			return decision, reviewErr
 		}
 		prov, _, ok := s.providerForProfile(profileID)
 		if !ok {
@@ -94,6 +116,34 @@ func streamCollectText(ctx context.Context, prov llm.Provider, system, user stri
 }
 
 // --- intercept rule CRUD ---
+
+// recordJevJudgeUsage books a Jev judge call into the usage ledger. Jev does not
+// go through the chat provider, so nothing else would record it.
+func (s *Server) recordJevJudgeUsage(ctx context.Context, profile *db.LLMProfile, usage jev.Usage, started time.Time, callErr error) {
+	if s == nil || s.m == nil || s.m.PG() == nil || profile == nil {
+		return
+	}
+	status := "ok"
+	if callErr != nil {
+		status = "error"
+	}
+	model := strings.TrimSpace(profile.Model)
+	if model == "" {
+		model = jev.DefaultModel
+	}
+	if err := s.m.PG().InsertLLMUsage(&db.LLMUsage{
+		TaskID:       llmrec.TaskIDFrom(ctx),
+		Worker:       judgeWorkerLane,
+		Model:        model,
+		ProfileName:  profile.Name,
+		LatencyMs:    int(time.Since(started).Milliseconds()),
+		InputTokens:  usage.InputTokens,
+		OutputTokens: usage.OutputTokens,
+		Status:       status,
+	}); err != nil {
+		log.Printf("[llmusage] Jev judge insert: %v", err)
+	}
+}
 
 func (s *Server) interceptListRules(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)

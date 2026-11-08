@@ -32,7 +32,10 @@ import (
 
 // Config describes the LLM backend resolved from the environment.
 type Config struct {
-	Format  llm.Format
+	Format llm.Format
+	// Jev marks the TypeSafe System One judge protocol. It must never be sent
+	// down the chat/completions provider path.
+	Jev     bool
 	BaseURL string
 	APIKey  string
 	Model   string
@@ -278,6 +281,13 @@ func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
 		Stream:  true, // streaming by default; the caller overrides per profile
 	}
 	switch strings.TrimSpace(provider) {
+	case "jev":
+		// Judge-only protocol: NewProvider refuses it, so it can never become a
+		// chat provider by configuration alone.
+		c.Jev = true
+		if c.Model == "" {
+			c.Model = "jev-latest"
+		}
 	case "openai":
 		c.Format = llm.FormatOpenAI
 		// provider appends "/chat/completions"; tolerate a full endpoint URL.
@@ -341,6 +351,9 @@ func (c Config) Provider() string {
 // limiter lives on the single provider instance — so planner + all workers +
 // main agent (which share this provider) are bounded by one shared rate limit.
 func (c Config) NewProvider() (llm.Provider, error) {
+	if c.Jev {
+		return nil, fmt.Errorf("Jev System One is only usable as the intercept judge model, not as a chat provider")
+	}
 	client, err := quotaAwareHTTPClient(c.Proxy, c.SessionHeaderKey)
 	if err != nil {
 		return nil, err

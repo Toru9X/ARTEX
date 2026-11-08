@@ -25,6 +25,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/intercept/jev"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/skill"
 )
@@ -2074,6 +2075,28 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 			msg = "no API Key provided: the saved key is only sent to the endpoint it was saved for; enter the key to list models from a different base URL or provider"
 		}
 		writeJSON(w, 200, map[string]any{"ok": false, "error": msg})
+		return
+	}
+
+	// Jev exposes its own model list endpoint, outside the chat formats below.
+	if provider == "jev" {
+		jevBase, proxy := strings.TrimSpace(req.BaseURL), strings.TrimSpace(req.Proxy)
+		if req.ProfileID != nil {
+			if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
+				if jevBase == "" {
+					jevBase = p.BaseURL
+				}
+				if proxy == "" {
+					proxy = p.Proxy
+				}
+			}
+		}
+		models, err := (jev.Config{BaseURL: jevBase, APIKey: apiKey, Proxy: proxy}).ListModels(r.Context())
+		if err != nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "models": models})
 		return
 	}
 

@@ -23,6 +23,7 @@ import (
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/intercept/jev"
 	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/report"
@@ -1576,6 +1577,43 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(req.ReasoningEffort) == "" {
 			req.ReasoningEffort = stored.ReasoningEffort
 		}
+	}
+	// Jev speaks its own judge protocol, so it is tested directly rather than
+	// through the chat provider, which refuses to build for a Jev profile.
+	if strings.TrimSpace(req.Provider) == "jev" {
+		apiKey := strings.TrimSpace(req.APIKey)
+		baseURL, model := strings.TrimSpace(req.BaseURL), strings.TrimSpace(req.Model)
+		if stored != nil {
+			if apiKey == "" {
+				apiKey = stored.APIKey
+			}
+			if baseURL == "" {
+				baseURL = stored.BaseURL
+			}
+			if model == "" {
+				model = stored.Model
+			}
+		}
+		if apiKey == "" {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "no API key was provided"})
+			return
+		}
+		if model == "" {
+			model = jev.DefaultModel
+		}
+		proxy := strings.TrimSpace(req.Proxy)
+		if proxy == "" && stored != nil {
+			proxy = stored.Proxy
+		}
+		testCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		lat, reply, err := (jev.Config{BaseURL: baseURL, APIKey: apiKey, Model: model, Proxy: proxy}).TestConnection(testCtx)
+		if err != nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "latency_ms": lat.Milliseconds(), "model": model, "reply": truncateReply(reply)})
+		return
 	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
 	// mirror production: send the SAME thinking params so a provider that rejects the

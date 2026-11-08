@@ -76,9 +76,10 @@ func TestResolveExportScreenshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A leading slash is deliberately not listed: on POSIX that is an absolute
+	// path and takes the in-workspace branch below instead.
 	for _, raw := range []string{
 		"findings/screenshots/finding-7-step-1.png",
-		"/findings/screenshots/finding-7-step-1.png",
 		"workspace://findings/screenshots/finding-7-step-1.png",
 	} {
 		got, ok := resolveExportScreenshot(workspace, raw)

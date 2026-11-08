@@ -313,21 +313,34 @@ const (
 // Judge default values.
 const (
 	defaultJudgeTimeoutSecs      = 15
-	defaultJudgeFailAction       = "allow"
-	defaultJudgeAskTimeoutSecs   = 300
-	defaultJudgeAskTimeoutAction = "deny"
+	defaultJudgeFailAction       = "ask"
+	settingJudgeRetryCount       = "llm_judge_retry_count"
+	settingJudgeRetryIntervalMS  = "llm_judge_retry_interval_ms"
+	settingJudgeIncompleteScript = "llm_judge_incomplete_script_action"
+	settingJudgeConfidence       = "llm_judge_confidence_threshold"
+	defaultJudgeRetryCount       = 3
+	defaultJudgeConfidence       = 0.55
+	// DefaultIncompleteScriptAction keeps an incomplete snapshot with the judge
+	// rather than falling back to a human prompt on every partial read.
+	DefaultIncompleteScriptAction = "model"
+	defaultJudgeAskTimeoutSecs    = 300
+	defaultJudgeAskTimeoutAction  = "deny"
 )
 
 // JudgeConfig is the resolved LLM-fallback-judge configuration. Prompt is always
 // non-empty (falls back to DefaultJudgePrompt).
 type JudgeConfig struct {
-	Enabled           bool   `json:"enabled"`
-	ProfileID         int64  `json:"profile_id"` // 0 = follow active/default
-	Prompt            string `json:"prompt"`
-	TimeoutSeconds    int    `json:"timeout_seconds"`
-	FailAction        string `json:"fail_action"` // allow|ask|deny
-	AskTimeoutSeconds int    `json:"ask_timeout_seconds"`
-	AskTimeoutAction  string `json:"ask_timeout_action"` // allow|deny
+	Enabled                bool    `json:"enabled"`
+	ProfileID              int64   `json:"profile_id"` // 0 = follow active/default
+	Prompt                 string  `json:"prompt"`
+	TimeoutSeconds         int     `json:"timeout_seconds"` // per attempt
+	RetryCount             int     `json:"retry_count"`     // extra attempts; 0 = no retry
+	RetryIntervalMS        int     `json:"retry_interval_ms"`
+	FailAction             string  `json:"fail_action"` // allow|ask|deny
+	AskTimeoutSeconds      int     `json:"ask_timeout_seconds"`
+	AskTimeoutAction       string  `json:"ask_timeout_action"`       // allow|deny
+	IncompleteScriptAction string  `json:"incomplete_script_action"` // ask|model
+	ConfidenceThreshold    float64 `json:"confidence_threshold"`     // Jev only; below this becomes ask
 }
 
 // judgeConfig reads the judge configuration from settings, applying defaults for
@@ -335,12 +348,16 @@ type JudgeConfig struct {
 // follows dwarfs a few KV reads, and freshness avoids a cache-invalidation path.
 func (i *Interceptor) judgeConfig() JudgeConfig {
 	c := JudgeConfig{
-		Enabled:           i.db.GetBool(settingJudgeEnabled, false),
-		ProfileID:         int64(i.getSettingInt(settingJudgeProfileID, 0)),
-		TimeoutSeconds:    i.getSettingInt(settingJudgeTimeoutSecs, defaultJudgeTimeoutSecs),
-		FailAction:        i.getSettingChoice(settingJudgeFailAction, defaultJudgeFailAction, "allow", "ask", "deny"),
-		AskTimeoutSeconds: i.getSettingInt(settingJudgeAskTimeoutSecs, defaultJudgeAskTimeoutSecs),
-		AskTimeoutAction:  i.getSettingChoice(settingJudgeAskTimeoutAction, defaultJudgeAskTimeoutAction, "allow", "deny"),
+		Enabled:                i.db.GetBool(settingJudgeEnabled, false),
+		ProfileID:              int64(i.getSettingInt(settingJudgeProfileID, 0)),
+		TimeoutSeconds:         i.getSettingInt(settingJudgeTimeoutSecs, defaultJudgeTimeoutSecs),
+		RetryCount:             min(max(i.getSettingInt(settingJudgeRetryCount, defaultJudgeRetryCount), 0), MaxJudgeRetryCount),
+		RetryIntervalMS:        min(max(i.getSettingInt(settingJudgeRetryIntervalMS, defaultJudgeRetryIntervalMS), 0), MaxJudgeRetryIntervalMS),
+		FailAction:             i.getSettingChoice(settingJudgeFailAction, defaultJudgeFailAction, "allow", "ask", "deny"),
+		AskTimeoutSeconds:      i.getSettingInt(settingJudgeAskTimeoutSecs, defaultJudgeAskTimeoutSecs),
+		AskTimeoutAction:       i.getSettingChoice(settingJudgeAskTimeoutAction, defaultJudgeAskTimeoutAction, "allow", "deny"),
+		IncompleteScriptAction: i.getSettingChoice(settingJudgeIncompleteScript, DefaultIncompleteScriptAction, "ask", "model"),
+		ConfidenceThreshold:    i.getSettingFloat(settingJudgeConfidence, defaultJudgeConfidence),
 	}
 	// Prompt: stored value if non-empty, else the built-in template.
 	if v, ok, _ := i.db.GetSetting(settingJudgePrompt); ok && strings.TrimSpace(v) != "" {
@@ -369,6 +386,20 @@ func (i *Interceptor) getSettingInt(key string, def int) int {
 	return n
 }
 
+// getSettingFloat reads a float setting, falling back to def on a missing or
+// unparsable value.
+func (i *Interceptor) getSettingFloat(key string, def float64) float64 {
+	v, ok, err := i.db.GetSetting(key)
+	if err != nil || !ok {
+		return def
+	}
+	n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
 func (i *Interceptor) getSettingChoice(key, def string, allowed ...string) string {
 	v, ok, err := i.db.GetSetting(key)
 	if err != nil || !ok {
@@ -390,6 +421,14 @@ func (i *Interceptor) GetJudgeConfig() JudgeConfig { return i.judgeConfig() }
 // SetJudgeConfig persists the judge configuration. An empty Prompt clears the
 // override (the built-in template is used again).
 func (i *Interceptor) SetJudgeConfig(c JudgeConfig) error {
+	// Validate before writing anything: a half-written config would leave the
+	// judge running on a mix of old and new settings.
+	if err := c.ValidateRetry(); err != nil {
+		return err
+	}
+	if c.ConfidenceThreshold < 0 || c.ConfidenceThreshold > 1 {
+		return fmt.Errorf("confidence_threshold must be between 0 and 1")
+	}
 	if err := i.db.SetBool(settingJudgeEnabled, c.Enabled); err != nil {
 		return err
 	}
@@ -417,6 +456,18 @@ func (i *Interceptor) SetJudgeConfig(c JudgeConfig) error {
 	if err := i.db.SetSetting(settingJudgeAskTimeoutAction, c.AskTimeoutAction); err != nil {
 		return err
 	}
+	if err := i.db.SetSetting(settingJudgeRetryCount, strconv.Itoa(c.RetryCount)); err != nil {
+		return err
+	}
+	if err := i.db.SetSetting(settingJudgeRetryIntervalMS, strconv.Itoa(c.RetryIntervalMS)); err != nil {
+		return err
+	}
+	if err := i.db.SetSetting(settingJudgeIncompleteScript, c.IncompleteScriptAction); err != nil {
+		return err
+	}
+	if err := i.db.SetSetting(settingJudgeConfidence, strconv.FormatFloat(c.ConfidenceThreshold, 'f', 4, 64)); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -436,13 +487,13 @@ func (i *Interceptor) Judge(ctx context.Context, tool string, arguments json.Raw
 	}
 
 	cctx := ctx
+	cancel := func() {}
 	if cfg.TimeoutSeconds > 0 {
-		var cancel context.CancelFunc
 		cctx, cancel = context.WithTimeout(ctx, time.Duration(cfg.TimeoutSeconds)*time.Second)
-		defer cancel()
 	}
 
 	input, contextErr := BuildReviewInput(cctx, tool, arguments)
+	cancel() // Capture once; every model attempt below gets its own timeout.
 	cfg.Prompt = EffectiveJudgePrompt(cfg.Prompt)
 	var out Decision
 	var err error
@@ -453,7 +504,7 @@ func (i *Interceptor) Judge(ctx context.Context, tool string, arguments json.Raw
 		out = Decision{Action: "ask", ModelFallback: true, Message: "review context incomplete, manual confirmation required: " + contextErr.Error()}
 	} else {
 		modelInput, _ = json.Marshal(input)
-		out, err = rv(cctx, cfg.ProfileID, cfg.Prompt, input)
+		out, err = reviewWithRetry(ctx, cfg, rv, input)
 	}
 	if err != nil {
 		out = Decision{ProfileID: out.ProfileID, ModelFallback: true, Action: cfg.FailAction, Message: "model review failed, applying failure policy: " + err.Error()}

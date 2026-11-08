@@ -1087,7 +1087,7 @@ export interface NotificationDelivery {
 export interface LLMProfile {
   id: string;
   name: string;
-  format: "openai" | "anthropic" | "openai-responses" | "ollama";
+  format: "openai" | "anthropic" | "openai-responses" | "ollama" | "jev";
   base_url?: string;
   proxy?: string;
   model: string;
@@ -1540,10 +1540,14 @@ export interface JudgeConfig {
   enabled: boolean;
   profile_id: number; // 0 = follow the active/default profile
   prompt: string; // verdict prompt; on GET the backend backfills the full built-in template when unset
-  timeout_seconds: number; // model call timeout
+  timeout_seconds: number; // timeout per model call
+  retry_count: number; // extra attempts after a failed review; 0 = no retry
+  retry_interval_ms: number; // wait between retries in ms; 0 = retry at once
   fail_action: "allow" | "ask" | "deny"; // fallback when the model errors/times out/is unparseable
   ask_timeout_seconds: number; // approval wait timeout after the model says ask and it goes to a human
   ask_timeout_action: "allow" | "deny"; // default action after the approval timeout
+  incomplete_script_action: "ask" | "model"; // on an incomplete script snapshot: ask a human, or let the model judge
+  confidence_threshold: number; // Jev only: below this confidence the verdict becomes ask
 }
 
 // JudgeUsage: cumulative token usage of model fallback approval (the judge channel) + daily series for the last N days.
