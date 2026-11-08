@@ -446,6 +446,11 @@ export const api = {
   // Asset coverage graph: every in-scope asset + root-domain/company nodes used for connection, with tested/in_scope.
   taskCoverageGraph: (id: string) => get<CoverageGraphData>(`/tasks/${id}/coverage-graph`),
   // Global llm_usage aggregate (the dashboard's new token view): totals per profile + daily buckets.
+  // ---- topology mapping (the asset_mapper agent) ----
+  startTopologyMapping: (id: string) =>
+    post<{ status: string; agent_key: string; conversation_id: number }>(`/tasks/${id}/topology-mapping`, {}),
+  topologyMappingStatus: (id: string) =>
+    get<{ running: boolean; conversation_id?: number }>(`/tasks/${id}/topology-mapping/status`),
   usageStats: (days = 365) => get<UsageStats>(`/tokens/usage?days=${days}`),
   // ---- Goal management (overview) ----
   // All goals of this task (text/vulnclass/state).

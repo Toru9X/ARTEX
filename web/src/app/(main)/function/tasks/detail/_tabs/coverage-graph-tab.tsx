@@ -1,15 +1,19 @@
 "use client";
 
 import * as React from "react";
+
 import type { Graph as G6Graph } from "@antv/g6";
 import {
   AppWindow,
   Building2,
+  ChevronDown,
+  ChevronUp,
   Globe,
   Link2,
   type LucideIcon,
   Radio,
   RefreshCw,
+  RotateCcw,
   Server,
   Waypoints,
 } from "lucide-react";
@@ -18,21 +22,51 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { api } from "@/lib/api";
 import type { CoverageAssetRef, CoverageAssetRefs, CoverageGraphEdge, CoverageGraphNode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-// Default number of children shown per kind under each parent; the rest fold away, and "Show more" pulls in this many each time.
-const FOLD_LIMIT = 20;
-const FOLD_STEP = 20;
+// How many children of one kind are shown under a parent by default; the rest fold away, and "show more" pulls in another batch of this size.
+const FOLD_LIMIT = 12;
+const FOLD_STEP = 12;
 
 type Kind = CoverageGraphNode["kind"];
+
+type Zone = "internet" | "boundary" | "internal";
+type CoverageViewMode = "asset" | "network";
+
+const zoneMeta: Record<Zone, { label: string; description: string; className: string }> = {
+  internet: {
+    label: "Internet",
+    description: "public domains / external entry points",
+    className: "bg-sky-50/70 dark:bg-sky-950/20",
+  },
+  boundary: {
+    label: "Boundary",
+    description: "services / gateways / exposure",
+    className: "bg-amber-50/70 dark:bg-amber-950/15",
+  },
+  internal: {
+    label: "Internal",
+    description: "internal assets / applications / endpoints",
+    className: "bg-emerald-50/65 dark:bg-emerald-950/15",
+  },
+};
+
+// New data uses the authoritative zone the backend computed from addresses and
+// exposure evidence; only data without a zone falls back to the asset kind, so a
+// public endpoint is never pushed into the internal zone by a kind rule alone.
+function zoneOf(node: CoverageGraphNode): Zone {
+  if (node.zone === "internet" || node.zone === "boundary" || node.zone === "internal") {
+    return node.zone;
+  }
+  if (node.kind === "company" || node.kind === "root_domain" || node.kind === "subdomain" || node.kind === "ip") {
+    return "internet";
+  }
+  if (node.kind === "service") return "boundary";
+  return "internal";
+}
 
 type KindMeta = { label: string; icon: LucideIcon; iconBg: string; hex: string; size: number };
 
@@ -46,9 +80,10 @@ const kindMeta: Record<Kind, KindMeta> = {
   endpoint: { label: "Endpoint", icon: Link2, iconBg: "bg-rose-500", hex: "#f43f5e", size: 20 },
 };
 
-// G6 node icons use the platform's lucide icons: render lucide SVG paths (v1.22) as white-stroked
-// data URIs for node iconSrc (white reads well on both solid and gray fills). Hand-inlined to avoid react-dom/server
-// issues in the React19/Next client bundle.
+// G6 node icons use the platform's own lucide icons: the lucide SVG paths (v1.22) are
+// rendered into a white-stroked data URI used as the node's iconSrc (white reads clearly
+// on both solid and grey fills). Inlined by hand to avoid react-dom/server in a
+// React 19 / Next client bundle.
 function svgUri(inner: string, filled = false): string {
   const attrs = filled
     ? 'fill="#fff" stroke="none"'
@@ -81,13 +116,35 @@ const KIND_ICON: Record<Kind, string> = {
   ),
 };
 
+type DatabaseEngine = "mysql" | "sqlserver" | "postgres" | "redis" | "database";
+
+const DATABASE_ICON: Record<DatabaseEngine, string> = {
+  mysql: svgUri('<text x="12" y="15" text-anchor="middle" font-size="8" font-weight="700">MY</text>', true),
+  sqlserver: svgUri('<text x="12" y="15" text-anchor="middle" font-size="7" font-weight="700">MS</text>', true),
+  postgres: svgUri('<text x="12" y="15" text-anchor="middle" font-size="7" font-weight="700">PG</text>', true),
+  redis: svgUri('<text x="12" y="15" text-anchor="middle" font-size="8" font-weight="700">RD</text>', true),
+  database: svgUri(
+    '<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v9c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 10c0 1.7 3.1 3 7 3s7-1.3 7-3"/>',
+  ),
+};
+
+function databaseEngine(node: CoverageGraphNode): DatabaseEngine | null {
+  const raw = `${node.service_type ?? ""} ${node.label} ${node.page_title ?? ""}`.toLowerCase();
+  if (/mysql|mariadb/.test(raw)) return "mysql";
+  if (/sql\s*server|mssql|microsoft sql/.test(raw)) return "sqlserver";
+  if (/postgres|postgresql/.test(raw)) return "postgres";
+  if (/redis/.test(raw)) return "redis";
+  if (/database|dbms|oracle|mongodb|mongo|clickhouse|postgres|mysql|redis/.test(raw)) return "database";
+  return null;
+}
+
 const FOLD_ICON = svgUri(
   '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>',
   true,
 );
 
 // ---------------------------------------------------------------------------
-// Folding: full graph → currently-visible node/edge set (top-down cascading fold).
+// Folding: the full graph -> the currently visible node/edge set (cascading top-down).
 // ---------------------------------------------------------------------------
 type FoldNode = {
   fold: true;
@@ -109,6 +166,7 @@ function computeVisible(
   nodes: CoverageGraphNode[],
   edges: CoverageGraphEdge[],
   expanded: Map<string, number>,
+  showAllNetworkNodes = false,
 ): { renderNodes: RenderNode[]; renderEdges: CoverageGraphEdge[] } {
   const byKey = new Map(nodes.map((n) => [n.key, n]));
   const parentOf = new Map<string, string>();
@@ -148,7 +206,9 @@ function computeVisible(
     for (const [kind, arr] of groups) {
       arr.sort(sortChildren);
       const groupId = `${parent}::${kind}`;
-      const shown = expanded.get(groupId) ?? FOLD_LIMIT;
+      // Network mode should show the complete topology for ordinary task
+      // sizes. Keep folding as a safety valve for very large inventories.
+      const shown = showAllNetworkNodes && arr.length <= 80 ? arr.length : (expanded.get(groupId) ?? FOLD_LIMIT);
       const visibleChildren = arr.slice(0, shown);
       const hidden = arr.slice(shown);
       for (const c of visibleChildren) {
@@ -175,8 +235,8 @@ function computeVisible(
 }
 
 // ---------------------------------------------------------------------------
-// G6 data mapping. Custom fields go at the node top level (G6 v5 official force example convention: style/layout callbacks read d.<field> directly).
-// ---------------------------------------------------------------------------
+// G6 data mapping. Custom fields live at the node's top level (the G6 v5 force example's
+// convention: style/layout callbacks read d.<field> directly).
 type G6NodeDatum = {
   id: string;
   kind: Kind;
@@ -185,15 +245,45 @@ type G6NodeDatum = {
   inScope: boolean;
   lbl: string;
   size: number;
+  active: boolean;
+  iconSrc: string;
+  x: number;
+  y: number;
+  // G6 v5 reads the initial position from style.x/style.y. Keeping the
+  // coordinates on the datum alone makes every node start at (0, 0), after
+  // which fitView magnifies one node and hides the rest.
+  style: { x: number; y: number };
 };
+
+type G6EdgeDatum = { source: string; target: string; active: boolean };
 
 function trunc(s: string, n = 26): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-// Node text in the graph: services omit the full URL and show only port·title·status code; endpoints show only the path.
-// Other kinds reuse the backend-provided label.
-function graphLabel(n: CoverageGraphNode): string {
+// Node captions: a service shows port - title - status code rather than the full URL,
+// an endpoint shows only its path, and every other kind keeps the backend's label.
+function graphLabel(n: CoverageGraphNode, viewMode: CoverageViewMode = "asset"): string {
+  if (viewMode === "network") {
+    if (n.kind === "endpoint") {
+      if (n.url) {
+        try {
+          return new URL(n.url).pathname || "/";
+        } catch {
+          /* invalid URL: fall back to the asset label */
+        }
+      }
+      return n.label || n.domain || n.ip || "endpoint";
+    }
+    if (n.kind === "service") {
+      const engine = databaseEngine(n);
+      const host = n.domain || n.ip || n.label;
+      return engine
+        ? `${engine.toUpperCase()} · ${host}${n.port ? `:${n.port}` : ""}`
+        : `${host}${n.port ? `:${n.port}` : ""}`;
+    }
+    return n.label || n.domain || n.ip || n.app_name || kindMeta[n.kind].label;
+  }
   if (n.kind === "service") {
     const parts: string[] = [];
     if (n.port) parts.push(`:${n.port}`);
@@ -211,8 +301,94 @@ function graphLabel(n: CoverageGraphNode): string {
   return n.label;
 }
 
-function toG6Nodes(renderNodes: RenderNode[]): G6NodeDatum[] {
+function toG6Nodes(renderNodes: RenderNode[], activeKeys: Set<string>, viewMode: CoverageViewMode): G6NodeDatum[] {
+  const buckets: Record<Zone, RenderNode[]> = { internet: [], boundary: [], internal: [] };
+  for (const rn of renderNodes) {
+    buckets[rn.fold ? "boundary" : zoneOf(rn.node)].push(rn);
+  }
+  const maxRows = Math.max(
+    ...(["internet", "boundary", "internal"] as Zone[]).map((zone) => Math.ceil(buckets[zone].length / 2)),
+    1,
+  );
+  const virtualHeight =
+    viewMode === "network"
+      ? Math.max(760, maxRows * 78 + 120)
+      : Math.max(760, Math.max(buckets.internet.length, buckets.boundary.length, buckets.internal.length, 1) * 42);
+  const positions = new Map<string, { x: number; y: number }>();
+  const xByZone: Record<Zone, number> = { internet: 150, boundary: 600, internal: 1050 };
+  const xByAssetKind: Partial<Record<Kind, number>> = {
+    company: 120,
+    root_domain: 180,
+    subdomain: 360,
+    ip: 520,
+    service: 680,
+    app: 680,
+    endpoint: 1000,
+  };
+  const placeGrid = (items: RenderNode[], left: number, right: number) => {
+    if (items.length === 0) return;
+    // Keep the layout deterministic while using multiple columns. A wider
+    // graph gets more columns, so large asset groups stop forming a single
+    // unreadable vertical chain.
+    const columns = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(items.length / 1.5))));
+    const rows = Math.ceil(items.length / columns);
+    items.forEach((rn, index) => {
+      const column = index % columns;
+      const row = Math.floor(index / columns);
+      positions.set(rn.key, {
+        x: left + ((column + 1) * (right - left)) / (columns + 1),
+        y: 70 + ((row + 1) * (virtualHeight - 140)) / (rows + 1),
+      });
+    });
+  };
+
+  if (viewMode === "network") {
+    const zoneBounds: Record<Zone, [number, number]> = {
+      internet: [35, 415],
+      boundary: [485, 865],
+      internal: [935, 1315],
+    };
+    for (const zone of Object.keys(buckets) as Zone[]) {
+      const items = [...buckets[zone]].sort((a, b) => {
+        const ak = a.fold ? "fold" : a.kind;
+        const bk = b.fold ? "fold" : b.kind;
+        return ak.localeCompare(bk) || (a.fold ? a.key : a.node.label).localeCompare(b.fold ? b.key : b.node.label);
+      });
+      // Two generous columns keep long host names readable. A single column is
+      // used for short groups so the parent/child relationship remains obvious.
+      if (items.length <= 8) {
+        items.forEach((rn, index) =>
+          positions.set(rn.key, {
+            x: (zoneBounds[zone][0] + zoneBounds[zone][1]) / 2,
+            y: 90 + ((index + 1) * (virtualHeight - 150)) / (items.length + 1),
+          }),
+        );
+      } else {
+        const columns = [zoneBounds[zone][0] + 105, zoneBounds[zone][1] - 105];
+        const rows = Math.ceil(items.length / 2);
+        items.forEach((rn, index) =>
+          positions.set(rn.key, {
+            x: columns[index % 2],
+            y: 90 + ((Math.floor(index / 2) + 1) * (virtualHeight - 150)) / (rows + 1),
+          }),
+        );
+      }
+    }
+  } else {
+    const byKind = new Map<Kind, RenderNode[]>();
+    for (const rn of renderNodes) {
+      const group = byKind.get(rn.kind);
+      if (group) group.push(rn);
+      else byKind.set(rn.kind, [rn]);
+    }
+    for (const [kind, items] of byKind) {
+      const center = xByAssetKind[kind] ?? 600;
+      const width = items.length > 1 ? 180 : 0;
+      placeGrid(items, center - width / 2, center + width / 2);
+    }
+  }
   return renderNodes.map((rn) => {
+    const position = positions.get(rn.key) ?? { x: 600, y: virtualHeight / 2 };
     if (rn.fold) {
       return {
         id: rn.key,
@@ -222,6 +398,10 @@ function toG6Nodes(renderNodes: RenderNode[]): G6NodeDatum[] {
         inScope: false,
         lbl: `${rn.hidden.length} more ${kindMeta[rn.kind].label}`,
         size: 24,
+        active: activeKeys.has(rn.key),
+        iconSrc: FOLD_ICON,
+        style: { x: position.x, y: position.y },
+        ...position,
       };
     }
     return {
@@ -230,17 +410,35 @@ function toG6Nodes(renderNodes: RenderNode[]): G6NodeDatum[] {
       fold: false,
       tested: rn.node.tested,
       inScope: rn.node.in_scope,
-      lbl: trunc(graphLabel(rn.node) || kindMeta[rn.kind].label),
+      lbl: `${rn.node.tested ? "✓ " : ""}${trunc(graphLabel(rn.node, viewMode) || kindMeta[rn.kind].label, viewMode === "network" ? (rn.kind === "service" ? 22 : 18) : 26)}`,
       size: kindMeta[rn.kind].size,
+      active: activeKeys.has(rn.key),
+      iconSrc:
+        viewMode === "network" && databaseEngine(rn.node)
+          ? DATABASE_ICON[databaseEngine(rn.node) as DatabaseEngine]
+          : KIND_ICON[rn.kind],
+      style: { x: position.x, y: position.y },
+      ...position,
     };
   });
 }
 
-// G6's types put custom fields under data, but the official force examples (and the runtime) read d.<field> at the top level.
-// Callback parameters use unknown to satisfy the G6 signature; nd() casts back to our top-level shape internally.
+function networkWorldHeight(renderNodes: RenderNode[]): number {
+  const counts: Record<Zone, number> = { internet: 0, boundary: 0, internal: 0 };
+  for (const node of renderNodes) counts[node.fold ? "boundary" : zoneOf(node.node)] += 1;
+  return Math.max(
+    760,
+    Math.max(Math.ceil(counts.internet / 2), Math.ceil(counts.boundary / 2), Math.ceil(counts.internal / 2), 1) * 78 +
+      120,
+  );
+}
+
+// G6's types put custom fields under data, but the official force example (and the
+// runtime) read d.<field> at the top level. The callbacks take unknown to satisfy the
+// G6 signature and use nd() internally to cast back to our own shape.
 const nd = (d: unknown) => d as G6NodeDatum;
 
-// Tested = solid highlight; in scope but untested = gray; out of scope / folded = lighter gray + dashed stroke.
+// Tested = solid and highlighted; in scope but untested = grey; out of scope or folded = paler grey with a dashed stroke.
 function nodeFill(d: G6NodeDatum): string {
   if (d.fold) return "#f1f5f9";
   if (!d.inScope) return "#e2e8f0";
@@ -248,13 +446,14 @@ function nodeFill(d: G6NodeDatum): string {
   return "#94a3b8";
 }
 function nodeStroke(d: G6NodeDatum): string {
+  if (d.active) return "#0f766e";
   if (d.fold || !d.inScope) return "#94a3b8";
   if (d.tested) return "#0f766e";
   return "#64748b";
 }
 
 // ---------------------------------------------------------------------------
-// Drawers: asset nodes show details; fold nodes show the hidden list + "Show more".
+// Drawer: an asset node shows its details; a folded node shows what it hides plus "show more".
 // ---------------------------------------------------------------------------
 function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
   if (children === undefined || children === null || children === "") return null;
@@ -318,7 +517,7 @@ function AssetSheet({
         if (!cancelled) setRefs(r);
       })
       .catch(() => {
-        /* no refs or an error occurred: skip this section */
+        /* no links, or an error: leave the section out */
       });
     return () => {
       cancelled = true;
@@ -331,7 +530,9 @@ function AssetSheet({
           <>
             <SheetHeader className="border-b p-4">
               <div className="flex items-center gap-2.5 pr-8">
-                <span className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg shadow-sm", meta.iconBg)}>
+                <span
+                  className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg shadow-sm", meta.iconBg)}
+                >
                   <Icon className="size-4 text-white" />
                 </span>
                 <div className="min-w-0">
@@ -346,16 +547,16 @@ function AssetSheet({
               <div className="flex w-full min-w-0 flex-col gap-4 p-4">
                 <section>
                   <h4 className="text-muted-foreground mb-1 text-xs font-medium">Properties</h4>
-                  <DetailRow label="Type">{meta.label}</DetailRow>
+                  <DetailRow label="Kind">{meta.label}</DetailRow>
                   <DetailRow label="Test status">
                     {node.in_scope ? (
                       node.tested ? (
                         <span className="text-emerald-600 dark:text-emerald-400">Tested</span>
                       ) : (
-                        <span className="text-neutral-500">Untested</span>
+                        <span className="text-neutral-500">Not tested</span>
                       )
                     ) : (
-                      <span className="text-neutral-400">Out of scope (connecting node)</span>
+                      <span className="text-neutral-400">Out of scope (link node)</span>
                     )}
                   </DetailRow>
                   <DetailRow label="Domain">{node.domain}</DetailRow>
@@ -374,9 +575,9 @@ function AssetSheet({
                 </section>
                 {refs && (refs.intents.length > 0 || refs.facts.length > 0 || refs.findings.length > 0) && (
                   <section className="flex flex-col gap-3 border-t pt-3">
-                    <RefList title="Related intents" items={refs.intents} />
-                    <RefList title="Related facts" items={refs.facts} />
-                    <RefList title="Related findings" items={refs.findings} />
+                    <RefList title="Linked intents" items={refs.intents} />
+                    <RefList title="Linked facts" items={refs.facts} />
+                    <RefList title="Linked findings" items={refs.findings} />
                   </section>
                 )}
                 <section className="border-t pt-3">
@@ -416,7 +617,9 @@ function FoldSheet({
               <SheetTitle className="text-base">
                 Hidden {meta.label} ({fold.hidden.length})
               </SheetTitle>
-              <p className="text-muted-foreground text-xs">Tested items are shown first. Click "Show more" to pull the next batch into the graph.</p>
+              <p className="text-muted-foreground text-xs">
+                Tested assets come first. "Show more" pulls the next batch into the graph.
+              </p>
             </SheetHeader>
             <ScrollArea className="min-h-0 flex-1">
               <div className="flex flex-col gap-1 p-3">
@@ -464,26 +667,70 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
   const [expanded, setExpanded] = React.useState<Map<string, number>>(new Map());
   const [selectedAsset, setSelectedAsset] = React.useState<CoverageGraphNode | null>(null);
   const [selectedFoldId, setSelectedFoldId] = React.useState<string | null>(null);
+  const [activePath, setActivePath] = React.useState<string[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [mapping, setMapping] = React.useState(false);
+  const [mappingConversationId, setMappingConversationId] = React.useState<number | null>(null);
+  const [networkReportAt, setNetworkReportAt] = React.useState<Date | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = React.useState<Date | null>(null);
+  const [viewMode, setViewMode] = React.useState<CoverageViewMode>("asset");
+  const [panelCollapsed, setPanelCollapsed] = React.useState(false);
+  const [viewport, setViewport] = React.useState<{ zoom: number; position: [number, number] }>({
+    zoom: 1,
+    position: [0, 0],
+  });
+  const viewModeRef = React.useRef<CoverageViewMode>(viewMode);
+  viewModeRef.current = viewMode;
 
   const containerRef = React.useRef<HTMLDivElement>(null);
   const graphRef = React.useRef<G6Graph | null>(null);
-  // The click handler needs the latest key→RenderNode map (G6 event callbacks read it via ref).
+  // The click handler needs the latest key -> RenderNode map (read from a ref, outside the G6 callback closure).
   const renderMapRef = React.useRef<Map<string, RenderNode>>(new Map());
-  const gDataRef = React.useRef<{ nodes: G6NodeDatum[]; edges: { source: string; target: string }[] }>({
+  const gDataRef = React.useRef<{ nodes: G6NodeDatum[]; edges: G6EdgeDatum[] }>({
     nodes: [],
     edges: [],
   });
+  const graphDataRef = React.useRef<typeof data>(null);
+
+  const syncViewport = React.useCallback(() => {
+    const graph = graphRef.current;
+    if (!graph || graph.destroyed) return;
+    const position = graph.getPosition();
+    setViewport({ zoom: graph.getZoom(), position: [position[0], position[1]] });
+  }, []);
+
+  const resetView = React.useCallback(
+    async (mode: CoverageViewMode = viewModeRef.current) => {
+      setActivePath([]);
+      setSelectedAsset(null);
+      setSelectedFoldId(null);
+      const graph = graphRef.current;
+      if (!graph || graph.destroyed) return;
+      await graph.zoomTo(1);
+      if (mode === "network") {
+        // Network coordinates are already assigned to the three fixed zone
+        // columns. Centering a graph with an empty zone shifts every node into
+        // the next visible column and makes the background regions misleading.
+        await graph.translateTo([0, 0]);
+      } else {
+        await graph.fitCenter();
+      }
+      syncViewport();
+    },
+    [syncViewport],
+  );
 
   const fetchGraph = React.useCallback(() => {
     setLoading(true);
     api
       .taskCoverageGraph(taskId)
       .then((g) => {
-        // Asset coverage disabled (B1): the graph still renders (in-scope assets/company links remain visible), but
-        // tested state is flattened away — no test progress and no tested highlight.
+        // Asset coverage is off (B1): still draw the graph (in-scope assets and company
+        // links stay visible) but flatten the tested state -- no progress, no highlight.
         const nodes = coverageEnabled ? (g.nodes ?? []) : (g.nodes ?? []).map((n) => ({ ...n, tested: false }));
         setData({ nodes, edges: g.edges ?? [] });
+        graphDataRef.current = { nodes, edges: g.edges ?? [] };
+        setLastSyncedAt(new Date());
       })
       .catch(() => {
         /* keep the previous data */
@@ -491,47 +738,143 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
       .finally(() => setLoading(false));
   }, [taskId, coverageEnabled]);
 
+  const remapNetwork = React.useCallback(async () => {
+    setMapping(true);
+    setNetworkReportAt(null);
+    try {
+      const run = await api.startTopologyMapping(taskId);
+      setMappingConversationId(run.conversation_id);
+    } catch {
+      setMapping(false);
+    }
+  }, [taskId]);
+
+  React.useEffect(() => {
+    if (!mappingConversationId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const state = await api.conversationMessages(mappingConversationId, 0);
+        if (cancelled) return;
+        if (!state.running) {
+          setMapping(false);
+          setMappingConversationId(null);
+          // The asset relationship graph is read directly from the asset store;
+          // completing the network report must not rebuild or replace it.
+          setNetworkReportAt(new Date());
+        }
+      } catch {
+        // Keep the spinner while the conversation endpoint is temporarily unavailable.
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [mappingConversationId]);
+
   React.useEffect(() => {
     fetchGraph();
   }, [fetchGraph]);
 
+  React.useEffect(() => {
+    let cancelled = false;
+    api
+      .topologyMappingStatus(taskId)
+      .then((status) => {
+        if (cancelled) return;
+        setMapping(status.running);
+        setMappingConversationId(status.conversation_id ?? null);
+      })
+      .catch(() => {
+        /* status is best effort; the graph remains usable */
+      });
+    setActivePath([]);
+    setSelectedAsset(null);
+    setSelectedFoldId(null);
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId]);
+
   const { renderNodes, renderEdges } = React.useMemo(
     () =>
       data
-        ? computeVisible(data.nodes, data.edges, expanded)
+        ? computeVisible(data.nodes, data.edges, expanded, viewMode === "network")
         : { renderNodes: [] as RenderNode[], renderEdges: [] as CoverageGraphEdge[] },
-    [data, expanded],
+    [data, expanded, viewMode],
   );
 
-  // Structure signature: rebuild the graph and re-run layout only when the visible node/edge set changes, to avoid needless jitter.
+  const displayNodes = React.useMemo(() => renderNodes, [renderNodes, viewMode]);
+  const displayNodeKeys = React.useMemo(() => new Set(displayNodes.map((node) => node.key)), [displayNodes]);
+  const displayEdges = React.useMemo(
+    () => renderEdges.filter((edge) => displayNodeKeys.has(edge.src) && displayNodeKeys.has(edge.dst)),
+    [displayNodeKeys, renderEdges],
+  );
+  const worldHeight = React.useMemo(() => networkWorldHeight(displayNodes), [displayNodes]);
+  const zoneCounts = React.useMemo(() => {
+    const counts: Record<Zone, number> = { internet: 0, boundary: 0, internal: 0 };
+    for (const node of displayNodes) counts[node.fold ? "boundary" : zoneOf(node.node)] += 1;
+    return counts;
+  }, [displayNodes]);
+
+  // Structural signature: rebuild the graph and rerun the layout only when the visible node/edge set changes, to avoid needless jitter.
   const sig = React.useMemo(
     () =>
-      `${renderNodes.map((n) => `${n.key}:${n.fold ? "f" : n.node.tested ? "t" : "u"}`).sort().join(",")}|${renderEdges.length}`,
-    [renderNodes, renderEdges],
+      `${displayNodes
+        .map((n) => `${n.key}:${n.fold ? "f" : n.node.tested ? "t" : "u"}`)
+        .sort()
+        .join(",")}|${displayEdges.length}|${activePath.join(",")}|${viewMode}`,
+    [activePath, displayEdges, displayNodes, viewMode],
   );
 
-  // Maintain gDataRef + renderMapRef (read by events and graph data application).
+  // Maintain gDataRef + renderMapRef (read by the event handlers and the data application).
   gDataRef.current = {
-    nodes: toG6Nodes(renderNodes),
-    edges: renderEdges.map((e) => ({ source: e.src, target: e.dst })),
+    nodes: toG6Nodes(displayNodes, new Set(activePath), viewMode),
+    edges: displayEdges.map((e) => ({
+      // The API stores child → parent containment. Topology reads naturally
+      // from internet entry → boundary service → internal asset, so reverse
+      // the visual arrow without changing the source graph or lineage logic.
+      source: e.dst,
+      target: e.src,
+      active: activePath.includes(e.src) && activePath.includes(e.dst),
+    })),
   };
   const rmap = new Map<string, RenderNode>();
-  for (const rn of renderNodes) rmap.set(rn.key, rn);
+  for (const rn of displayNodes) rmap.set(rn.key, rn);
   renderMapRef.current = rmap;
 
   const applyData = React.useCallback(() => {
     const graph = graphRef.current;
     if (!graph || graph.destroyed) return;
     graph.setData(gDataRef.current);
-    // render() runs the d3-force layout asynchronously; if the component unmounts/destroys before
-    // the layout lands, g6 throws accessing transform on the cleared context (see runtime/layout transformDataAfterLayout). This is a pure
-    // teardown race — swallow it, functionality is unaffected; real render errors (graph not destroyed) are still logged.
-    void graph.render().catch((err) => {
-      if (!graph.destroyed) console.error("[coverage-graph] render:", err);
-    });
-  }, []);
+    // render() runs the layout asynchronously; if the component is unmounted or destroyed
+    // before the layout lands, g6 touches transform on an already-cleared context and throws.
+    // That is a pure teardown race: swallow it, nothing is lost.
+    void graph
+      .render()
+      .then(() => {
+        if (graph.destroyed) return;
+        const active = gDataRef.current.nodes.filter((node) => node.active).map((node) => node.id);
+        // Keep the zone columns at their assigned coordinates. Centering a
+        // network graph with an empty zone causes the remaining nodes to slide
+        // into the next column, so network mode starts at the fixed origin.
+        const result =
+          active.length > 0
+            ? graph.focusElement(active)
+            : viewModeRef.current === "network"
+              ? graph.translateTo([0, 0])
+              : graph.fitCenter();
+        return result.then(() => syncViewport());
+      })
+      .catch((err) => {
+        if (!graph.destroyed) console.error("[coverage-graph] render:", err);
+      });
+  }, [syncViewport]);
 
-  // Build the graph (once). Dynamic import avoids the window dependency during SSR/static export.
+  // Build the graph once. The dynamic import avoids the window dependency during SSR and static export.
   React.useEffect(() => {
     let destroyed = false;
     let graph: G6Graph | null = null;
@@ -541,76 +884,89 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
       graph = new Graph({
         container: containerRef.current,
         autoResize: true,
-        autoFit: "view",
-        background: "#f0f2f7",
+        // Keep wheel/trackpad zoom within a readable range. Very small zoom
+        // values make labels and the fixed network zones appear to collapse
+        // into a single strip; an upper bound also prevents focusElement from
+        // pushing the selected node underneath the overlay panel.
+        zoomRange: [0.35, 3],
+        // Asset mode explicitly centers after rendering. Network mode keeps
+        // its fixed world coordinates so the three background zones align.
+        background: "transparent",
         node: {
           style: {
             size: (d: unknown) => nd(d).size,
             fill: (d: unknown) => nodeFill(nd(d)),
             stroke: (d: unknown) => nodeStroke(nd(d)),
-            lineWidth: (d: unknown) => (nd(d).fold || !nd(d).inScope ? 1 : 1.5),
+            lineWidth: (d: unknown) => (nd(d).fold || !nd(d).inScope ? 1 : nd(d).tested ? 3 : 1.5),
             lineDash: (d: unknown) => (nd(d).fold || !nd(d).inScope ? [3, 3] : [0]),
-            iconSrc: (d: unknown) => (nd(d).fold ? FOLD_ICON : KIND_ICON[nd(d).kind]),
+            iconSrc: (d: unknown) => nd(d).iconSrc,
             iconWidth: (d: unknown) => Math.max(12, nd(d).size * 0.55),
             iconHeight: (d: unknown) => Math.max(12, nd(d).size * 0.55),
             labelText: (d: unknown) => nd(d).lbl,
-            labelFontSize: 10,
+            labelFontSize: () => (viewModeRef.current === "network" ? 9 : 10),
             labelPlacement: "bottom",
             labelFill: "#475569",
             labelBackground: true,
             labelBackgroundFill: "rgba(255,255,255,0.75)",
             labelBackgroundRadius: 3,
             labelPadding: [1, 3],
+            opacity: (d: unknown) => (gDataRef.current.nodes.some((node) => node.active) && !nd(d).active ? 0.5 : 1),
           },
         },
         edge: {
-          style: { stroke: "#cbd5e1", lineWidth: 1, endArrow: false },
-        },
-        layout: {
-          type: "d3-force",
-          collide: { radius: (d: unknown) => (nd(d).size ? nd(d).size : 20) + 8 },
-          link: {
-            distance: (edge: unknown) => {
-              // Top levels (company/root domain) sit farther from child nodes, leaves closer. edge.source may be an id or an already-resolved node.
-              const s = (edge as { source: string | { id?: string } }).source;
-              const srcId = typeof s === "string" ? s : (s?.id ?? "");
-              const src = renderMapRef.current.get(srcId);
-              const k = src && !src.fold ? src.kind : "endpoint";
-              return k === "company" || k === "root_domain" ? 120 : 60;
-            },
-          },
-          manyBody: {
-            strength: (d: unknown) => (nd(d).kind === "endpoint" || nd(d).fold ? -60 : -200),
+          style: {
+            stroke: (d: unknown) => ((d as G6EdgeDatum).active ? "#0f766e" : "#cbd5e1"),
+            lineWidth: (d: unknown) => ((d as G6EdgeDatum).active ? 2.5 : 1),
+            opacity: (d: unknown) =>
+              gDataRef.current.edges.some((edge) => edge.active) && !(d as G6EdgeDatum).active ? 0.18 : 1,
+            endArrow: () => viewModeRef.current === "asset",
           },
         },
-        behaviors: ["drag-element-force", "drag-canvas", "zoom-canvas"],
+        behaviors: ["drag-element", "drag-canvas", "zoom-canvas"],
       });
+      graph.on("aftertransform", syncViewport);
+      graph.on("afterresize", syncViewport);
       graph.on("node:click", (evt: unknown) => {
         const id = (evt as { target?: { id?: string } }).target?.id;
         if (!id) return;
         const rn = renderMapRef.current.get(id);
         if (!rn) return;
-        if (rn.fold) setSelectedFoldId(rn.key);
-        else setSelectedAsset(rn.node);
+        if (rn.fold) {
+          setSelectedFoldId(rn.key);
+          return;
+        }
+        setSelectedAsset(rn.node);
+        const parents = new Map<string, string>();
+        for (const edge of graphDataRef.current?.edges ?? []) {
+          if (!parents.has(edge.src)) parents.set(edge.src, edge.dst);
+        }
+        const lineage: string[] = [];
+        let cursor: string | undefined = rn.node.key;
+        while (cursor && !lineage.includes(cursor)) {
+          lineage.push(cursor);
+          cursor = parents.get(cursor);
+        }
+        setActivePath(lineage);
+        void graph?.focusElement(lineage).then(() => syncViewport());
       });
       graphRef.current = graph;
       applyData();
     })();
     return () => {
       destroyed = true;
-      // Stop the layout before destroying: shrink the race window between "layout in flight" and "context cleared".
+      // Stop the layout before destroying, to narrow the "layout in flight, context cleared" race.
       try {
         graph?.stopLayout();
       } catch {
-        /* the graph may not be built yet or may have no layout context */
+        /* the graph may not exist yet, or may have no layout context left */
       }
       graph?.destroy();
       graphRef.current = null;
     };
-  }, [applyData]);
+  }, [applyData, resetView, syncViewport]);
 
-  // Visible set changed → re-feed data + layout. sig is only a re-layout trigger (applyData reads gDataRef).
-  // biome-ignore lint/correctness/useExhaustiveDependencies: sig is a deliberate re-layout trigger dependency
+  // Visible set changed -> reload the data and the layout. sig is only the rerun trigger (applyData reads gDataRef).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sig is a deliberate rerun trigger
   React.useEffect(() => {
     applyData();
   }, [sig, applyData]);
@@ -636,63 +992,277 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
   const inScope = data?.nodes.filter((n) => n.in_scope).length ?? 0;
 
   return (
-    <div className="relative h-full w-full">
-      <div ref={containerRef} className="h-full w-full" />
+    <div className="relative h-full w-full overflow-hidden bg-slate-100/80 dark:bg-slate-950/30">
+      {viewMode === "network" ? (
+        <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+          <div
+            className="absolute top-0 left-0 grid w-[1350px] grid-cols-3"
+            style={{
+              height: worldHeight,
+              transform: `translate(${viewport.position[0]}px, ${viewport.position[1]}px) scale(${viewport.zoom})`,
+              transformOrigin: "0 0",
+            }}
+          >
+            {(Object.keys(zoneMeta) as Zone[]).map((zone, index) => (
+              <div
+                key={zone}
+                className={cn(
+                  "relative border-r border-slate-200/80 dark:border-slate-800/80",
+                  zoneMeta[zone].className,
+                  index === 2 && "border-r-0",
+                )}
+              >
+                <div className="absolute top-3 left-4">
+                  <div className="text-foreground/80 text-sm font-semibold">{zoneMeta[zone].label}</div>
+                  <div className="text-muted-foreground mt-0.5 text-[11px]">{zoneMeta[zone].description}</div>
+                </div>
+                {zoneCounts[zone] === 0 && (
+                  <div className="text-muted-foreground/70 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-md border border-dashed border-slate-300/70 px-3 py-2 text-center text-xs dark:border-slate-700/70">
+                    No asset evidence in this zone yet
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="pointer-events-none absolute top-3 left-4 z-0">
+          <div className="text-foreground/80 text-sm font-semibold">Asset relationships</div>
+          <div className="text-muted-foreground mt-0.5 text-[11px]">Relationships by asset hierarchy</div>
+        </div>
+      )}
+      <div ref={containerRef} className="relative z-10 h-full w-full pt-12" />
 
-      {/* Legend + stats + refresh (overlay) */}
-      <div className="bg-card/95 pointer-events-auto absolute top-3 left-3 flex max-w-[340px] flex-col gap-2.5 rounded-lg border p-3 text-xs shadow-sm backdrop-blur">
+      {/* Legend + counts + refresh (overlay) */}
+      <div
+        className={cn(
+          "bg-card/95 pointer-events-auto absolute bottom-3 left-3 z-20 rounded-lg border shadow-sm backdrop-blur",
+          panelCollapsed
+            ? "flex items-center gap-2 px-2.5 py-2 text-xs"
+            : "flex w-[min(480px,calc(100%-1.5rem))] max-h-[calc(100%-1.5rem)] flex-col gap-2.5 overflow-auto p-3 text-xs",
+        )}
+      >
         <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-violet-100 text-violet-700 dark:bg-violet-950/60 dark:text-violet-300">
+              <Waypoints className="size-4" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-foreground truncate font-medium">
+                {viewMode === "network" ? "Topology mapping agent" : "Asset relationships"}
+              </div>
+              <div className="text-muted-foreground truncate text-[11px]">
+                {viewMode === "network"
+                  ? mapping
+                    ? "Mapping the network topology and writing both results…"
+                    : networkReportAt
+                      ? `Last mapped ${networkReportAt.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`
+                      : "Topology not mapped yet"
+                  : loading
+                    ? "Reading the asset inventory…"
+                    : lastSyncedAt
+                      ? `Live inventory data · ${lastSyncedAt.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`
+                      : "Waiting to read the inventory"}
+              </div>
+            </div>
+          </div>
           {total > 0 ? (
-            <span className="text-muted-foreground">
+            <span className="text-muted-foreground whitespace-nowrap">
               In scope <span className="text-foreground font-semibold tabular-nums">{inScope}</span>
               {coverageEnabled && (
                 <>
                   {" "}
-                  · Tested{" "}
+                  · tested{" "}
                   <span className="font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">{tested}</span>
                 </>
               )}
             </span>
           ) : (
-            <span className="text-muted-foreground">{loading ? "Loading…" : "No in-scope assets yet (anchor the task scope first)"}</span>
+            <span className="text-muted-foreground">
+              {loading ? "Loading…" : "No in-scope assets yet (anchor the task scope first)"}
+            </span>
           )}
-          <Button variant="ghost" size="icon" className="size-6" onClick={fetchGraph} title="Refresh">
-            <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-          </Button>
-        </div>
-        <div className="flex flex-wrap gap-x-3 gap-y-1.5">
-          {(Object.keys(kindMeta) as Kind[]).map((k) => {
-            const m = kindMeta[k];
-            const Icon = m.icon;
-            return (
-              <span key={k} className="text-foreground inline-flex items-center gap-1.5">
-                <span className={cn("flex size-4 items-center justify-center rounded", m.iconBg)}>
-                  <Icon className="size-2.5 text-white" />
-                </span>
-                {m.label}
-              </span>
-            );
-          })}
-        </div>
-        <div className="border-border/60 text-muted-foreground flex flex-wrap gap-x-3 gap-y-1.5 border-t pt-2">
-          {coverageEnabled && (
-            <>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="size-3 rounded-full bg-emerald-500" /> Tested (highlighted)
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="size-3 rounded-full bg-neutral-400" /> Untested
-              </span>
-            </>
+          {!panelCollapsed && (
+            <div className="flex shrink-0 items-center gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 px-2"
+                onClick={() => setPanelCollapsed(true)}
+                title="Collapse the panel"
+              >
+                <ChevronDown className="size-3.5" />
+                <span className="hidden sm:inline">Collapse</span>
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 px-2"
+                onClick={() => void resetView()}
+                title="Reset the view"
+              >
+                <RotateCcw className="size-3.5" />
+                <span className="hidden sm:inline">Reset view</span>
+              </Button>
+              {viewMode === "network" && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1.5 px-2"
+                  onClick={() => void remapNetwork()}
+                  disabled={mapping}
+                  title="Map the network topology again"
+                >
+                  <RefreshCw className={cn("size-3.5", (loading || mapping) && "animate-spin")} />
+                  <span className="hidden sm:inline">{mapping ? "Mapping…" : "Map the topology"}</span>
+                </Button>
+              )}
+            </div>
           )}
-          <span className="inline-flex items-center gap-1.5">
-            <span className="size-3 rounded-full border border-dashed border-neutral-400 bg-neutral-200" /> Out of scope
-          </span>
+          {panelCollapsed && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2"
+              onClick={() => setPanelCollapsed(false)}
+              title="Expand the panel"
+            >
+              <ChevronUp className="size-3.5" />
+              <span className="hidden sm:inline">Expand</span>
+            </Button>
+          )}
         </div>
-        <p className="text-muted-foreground/80 border-border/60 border-t pt-2 leading-relaxed">
-          Force-directed layout; drag nodes and scroll to zoom. The gray "⋯" is a fold node — click it to expand more.
-        </p>
+        {!panelCollapsed && (
+          <>
+            <div className="bg-muted/60 flex items-center gap-1 rounded-md p-1">
+              <Button
+                variant={viewMode === "asset" ? "secondary" : "ghost"}
+                size="sm"
+                className="h-7 flex-1 px-2 text-xs"
+                onClick={() => {
+                  setViewMode("asset");
+                  void resetView("asset");
+                }}
+              >
+                Asset relationships
+              </Button>
+              <Button
+                variant={viewMode === "network" ? "secondary" : "ghost"}
+                size="sm"
+                className="h-7 flex-1 px-2 text-xs"
+                onClick={() => {
+                  setViewMode("network");
+                  void resetView("network");
+                }}
+              >
+                Network topology
+              </Button>
+            </div>
+            <div className="flex flex-wrap gap-x-3 gap-y-1.5">
+              {(Object.keys(kindMeta) as Kind[]).map((k) => {
+                const m = kindMeta[k];
+                const Icon = m.icon;
+                return (
+                  <span key={k} className="text-foreground inline-flex items-center gap-1.5">
+                    <span className={cn("flex size-4 items-center justify-center rounded", m.iconBg)}>
+                      <Icon className="size-2.5 text-white" />
+                    </span>
+                    {m.label}
+                  </span>
+                );
+              })}
+            </div>
+            <div className="border-border/60 text-muted-foreground flex flex-wrap gap-x-3 gap-y-1.5 border-t pt-2">
+              {coverageEnabled && (
+                <>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="flex size-3 items-center justify-center rounded-full bg-emerald-600 text-[9px] font-bold text-white">
+                      ✓
+                    </span>{" "}
+                    Tested (green outline)
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="size-3 rounded-full bg-neutral-400" /> Not tested
+                  </span>
+                </>
+              )}
+              <span className="inline-flex items-center gap-1.5">
+                <span className="size-3 rounded-full border border-dashed border-neutral-400 bg-neutral-200" /> Out of
+                scope
+              </span>
+            </div>
+            {viewMode === "network" && (
+              <div className="border-border/60 flex flex-wrap gap-x-3 gap-y-1.5 border-t pt-2">
+                {(Object.keys(zoneMeta) as Zone[]).map((zone) => (
+                  <span key={zone} className="text-muted-foreground inline-flex items-center gap-1.5">
+                    <span
+                      className={cn(
+                        "size-2.5 rounded-full",
+                        zone === "internet" && "bg-sky-400",
+                        zone === "boundary" && "bg-amber-400",
+                        zone === "internal" && "bg-emerald-400",
+                      )}
+                    />
+                    {zoneMeta[zone].label}
+                  </span>
+                ))}
+              </div>
+            )}
+            <p className="text-muted-foreground/80 border-border/60 border-t pt-2 leading-relaxed">
+              {viewMode === "network"
+                ? "Only nodes with real asset evidence are drawn; an edge is ownership or a link, not a verified network path."
+                : "The relationship graph reads the inventory directly and needs no mapping run; click a node for its details and to highlight its chain, and the grey ⋯ opens more assets."}
+            </p>
+          </>
+        )}
       </div>
+
+      {selectedAsset && activePath.length > 0 && data && (
+        <div className="bg-card/95 pointer-events-auto absolute top-3 right-3 z-20 w-[min(310px,calc(100%-2rem))] rounded-lg border p-3 shadow-sm backdrop-blur">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-foreground text-sm font-semibold">Relationship path</div>
+              <div className="text-muted-foreground mt-0.5 text-[11px]">Traced upward from the selected asset</div>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={() => {
+                setActivePath([]);
+                void resetView();
+              }}
+            >
+              Clear the highlight
+            </Button>
+          </div>
+          <div className="mt-3 flex flex-col gap-1.5">
+            {[...activePath].reverse().map((key, index, path) => {
+              const node = data.nodes.find((item) => item.key === key);
+              if (!node) return null;
+              return (
+                <React.Fragment key={key}>
+                  <div className="flex min-w-0 items-center gap-2 rounded-md bg-muted/60 px-2 py-1.5 text-xs">
+                    <span
+                      className={cn(
+                        "size-2 shrink-0 rounded-full",
+                        zoneOf(node) === "internet" && "bg-sky-500",
+                        zoneOf(node) === "boundary" && "bg-amber-500",
+                        zoneOf(node) === "internal" && "bg-emerald-500",
+                      )}
+                    />
+                    <span className="text-muted-foreground shrink-0">{zoneMeta[zoneOf(node)].label}</span>
+                    <span className="min-w-0 flex-1 truncate font-mono" title={node.label}>
+                      {node.label}
+                    </span>
+                  </div>
+                  {index < path.length - 1 && <div className="text-muted-foreground pl-3 text-[10px]">↓</div>}
+                </React.Fragment>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <AssetSheet node={selectedAsset} taskId={taskId} onOpenChange={(o) => !o && setSelectedAsset(null)} />
       <FoldSheet

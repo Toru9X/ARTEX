@@ -242,6 +242,8 @@ var builtinAgents = []builtinAgent{
 	// Auto: built-in "platform operations" agent. Does not join the pentest
 	// orchestration loop; driven from the chat page, operates the platform with tools.
 	{"auto", "Auto", "assistant", "Platform operations assistant: manages tasks (create/view/pause/hint) and assets with tools, and can create/modify skills, custom tools, and MCP.", nil, false, nil},
+	// Asset mapper: read-only assistant used by the topology canvas and asset views.
+	{"asset_mapper", "Asset Mapping", "assistant", "Asset mapping assistant: summarizes how public, boundary and internal assets relate, and explains inbound paths from the real inventory rather than guessing at connections.", nil, false, nil},
 	// Pentest: built-in "solo pentest" agent. Driven from the chat page, it walks the
 	// full pentest chain alone from recon to wrap-up, planning, executing and
 	// verifying by itself. Interactive shell is on by default.

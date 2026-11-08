@@ -60,7 +60,10 @@ func builtinToolsByAgent() map[string][]actool.CoreTool {
 		// pentest (solo pentest agent) binds by default: list assets / insert assets /
 		// report finding / list findings / list companies.
 		// New databases are seeded from here; old databases are migrated by seedPentestDefaultBindings.
-		"pentest": {ts.listAssets(), ts.insertAssets(), ts.addFinding(), ts.listFindings(), ts.listCompanies(), ts.saveTaskCredential(), ts.listTaskCredentials()},
+		// asset_mapper reads the asset inventory only; it exists to map and explain
+		// topology, never to change or probe anything.
+		"asset_mapper": {ts.listAssets(), ts.listCompanies()},
+		"pentest":      {ts.listAssets(), ts.insertAssets(), ts.addFinding(), ts.listFindings(), ts.listCompanies(), ts.saveTaskCredential(), ts.listTaskCredentials()},
 	}
 }
 
@@ -84,7 +87,7 @@ var defaultUnbound = map[string]bool{"goal_met": true}
 // force-bound to empty.
 func BuiltinToolSeeds() []ToolSeed {
 	byAgent := builtinToolsByAgent()
-	order := []string{"mainagent", "goals", "planner", "worker", "auto", "pentest"}
+	order := []string{"mainagent", "goals", "planner", "worker", "auto", "asset_mapper", "pentest"}
 
 	type acc struct {
 		tool   actool.CoreTool

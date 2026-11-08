@@ -381,6 +381,8 @@ type CoverageGraphNode struct {
 	AppName     string `json:"app_name,omitempty"`
 	PageTitle   string `json:"page_title,omitempty"`
 	StatusCode  int    `json:"status_code,omitempty"`
+	Zone        string `json:"zone,omitempty"` // internet|boundary|internal
+	ZoneReason  string `json:"zone_reason,omitempty"`
 }
 
 // CoverageGraphEdge is a child→parent containment link (endpoint→service→
@@ -416,6 +418,45 @@ func hostPortOf(n *CoverageGraphNode) (string, int) {
 	return host, port
 }
 
+// coverageZone assigns a conservative, evidence-based network layer. Public
+// domains and public IPs are internet-facing; a service, app or endpoint with a
+// reachable host is boundary exposure; a private-address asset is internal.
+// Asset kind alone is never enough: a public endpoint must not land in the
+// internal zone merely because its kind is "endpoint".
+func coverageZone(n *CoverageGraphNode) {
+	if n == nil {
+		return
+	}
+	host := strings.TrimSpace(n.IP)
+	if host == "" {
+		host = strings.TrimSpace(n.Domain)
+	}
+	if host == "" && n.URL != "" {
+		parsed, _, _ := parseURL(normalizeURL(n.URL))
+		host = parsed
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			n.Zone, n.ZoneReason = "internal", "private, loopback or link-local address"
+			return
+		}
+	}
+	switch n.Kind {
+	case "company", "root_domain", "subdomain":
+		n.Zone, n.ZoneReason = "internet", "public domain or external entry point"
+	case "service", "app", "endpoint":
+		if host != "" {
+			n.Zone, n.ZoneReason = "boundary", "has a reachable domain, IP or URL"
+		} else {
+			n.Zone, n.ZoneReason = "internal", "no public host evidence; treated as an internal asset"
+		}
+	case "ip":
+		n.Zone, n.ZoneReason = "internet", "IP entry point not recognised as private"
+	default:
+		n.Zone, n.ZoneReason = "internal", "internal by default for an unknown asset kind"
+	}
+}
+
 // BuildCoverageGraph assembles the full coverage graph for a task and its direct
 // read-only sources: every in-scope asset plus connector root domains/companies,
 // with current-or-source fact anchors reflected in Tested. The legacy expID
@@ -447,6 +488,9 @@ ORDER BY a.id`, taskID)
 	companyIDs := map[int64]bool{} // referenced company ids (need a node)
 
 	add := func(n CoverageGraphNode) *CoverageGraphNode {
+		if n.Zone == "" {
+			coverageZone(&n)
+		}
 		if _, ok := byKey[n.Key]; ok {
 			return byKey[n.Key]
 		}

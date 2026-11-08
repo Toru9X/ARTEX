@@ -46,6 +46,40 @@ func TestBuiltinToolSeeds(t *testing.T) {
 	}
 }
 
+// TestAssetMapperSeedsReadOnlyAndKeepsPentestCredentials pins the asset_mapper
+// agent's binding (read-only asset tools) and guards this fork's own manual
+// credential tools, which must stay on pentest.
+func TestAssetMapperSeedsReadOnlyAndKeepsPentestCredentials(t *testing.T) {
+	byKey := map[string]ToolSeed{}
+	for _, s := range BuiltinToolSeeds() {
+		byKey[s.Key] = s
+	}
+	bound := func(key, agentKey string) bool {
+		for _, a := range byKey[key].Agents {
+			if a == agentKey {
+				return true
+			}
+		}
+		return false
+	}
+	for _, key := range []string{"list_assets", "list_companies"} {
+		if !bound(key, "asset_mapper") {
+			t.Errorf("asset_mapper should be bound to %s, got %v", key, byKey[key].Agents)
+		}
+	}
+	// The mapper only reads; anything that writes or probes stays off it.
+	for _, key := range []string{"insert_assets", "report_finding", "save_task_credential"} {
+		if bound(key, "asset_mapper") {
+			t.Errorf("asset_mapper must not be bound to %s", key)
+		}
+	}
+	for _, key := range []string{"save_task_credential", "list_task_credentials"} {
+		if !bound(key, "pentest") {
+			t.Errorf("pentest lost %s: %v", key, byKey[key].Agents)
+		}
+	}
+}
+
 // TestDecorateToolInjectsDefaults verifies a schema "default" fills a missing param
 // before the underlying handler runs, and an explicitly-provided value is kept.
 func TestDecorateToolInjectsDefaults(t *testing.T) {

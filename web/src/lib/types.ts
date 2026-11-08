@@ -312,6 +312,10 @@ export interface CoverageGraphNode {
   app_name?: string;
   page_title?: string;
   status_code?: number;
+  // The backend's authoritative zoning, computed from real addresses and
+  // exposure evidence; absent on data written before zoning existed.
+  zone?: "internet" | "boundary" | "internal";
+  zone_reason?: string;
 }
 
 export interface CoverageGraphEdge {

@@ -830,6 +830,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/companies/reattribute", s.reattribute)
 
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
+	mux.HandleFunc("POST /api/tasks/{id}/topology-mapping", s.taskAssetMapping)
+	mux.HandleFunc("GET /api/tasks/{id}/topology-mapping/status", s.taskAssetMappingStatus)
+	// The asset-mapping spelling is the same handler: both canvases start one run.
+	mux.HandleFunc("POST /api/tasks/{id}/asset-mapping", s.taskAssetMapping)
+	mux.HandleFunc("GET /api/tasks/{id}/asset-mapping/status", s.taskAssetMappingStatus)
 	mux.HandleFunc("GET /api/exploration/finding-cases", s.listFindingCases)
 	mux.HandleFunc("POST /api/exploration/finding-cases", s.mergeFindingCase)
 	mux.HandleFunc("GET /api/exploration/finding-cases/{id}", s.getFindingCase)
