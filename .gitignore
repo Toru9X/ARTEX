@@ -34,8 +34,9 @@ Thumbs.db
 # claude code local state
 .claude/
 
-# single-binary artifact with embedded frontend
+# single-binary artifact with embedded frontend (.exe is the same build on Windows)
 /artex
+/artex.exe
 # intermediate artifacts left next to the executable by one-click update (staging file / backup / failed version / upgrade marker)
 /artex.new
 /artex.new.sha256
