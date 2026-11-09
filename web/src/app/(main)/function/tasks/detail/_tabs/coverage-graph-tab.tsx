@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import type { CoverageAssetRef, CoverageAssetRefs, CoverageGraphEdge, CoverageGraphNode } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -749,13 +750,12 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
     }
   }, [taskId]);
 
-  React.useEffect(() => {
-    if (!mappingConversationId) return;
-    let cancelled = false;
-    const poll = async () => {
+  usePoll(
+    async (signal) => {
+      if (!mappingConversationId) return;
       try {
         const state = await api.conversationMessages(mappingConversationId, 0);
-        if (cancelled) return;
+        if (signal.aborted) return;
         if (!state.running) {
           setMapping(false);
           setMappingConversationId(null);
@@ -766,14 +766,10 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
       } catch {
         // Keep the spinner while the conversation endpoint is temporarily unavailable.
       }
-    };
-    void poll();
-    const timer = window.setInterval(() => void poll(), 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [mappingConversationId]);
+    },
+    2000,
+    { enabled: !!mappingConversationId, resetKey: mappingConversationId },
+  );
 
   React.useEffect(() => {
     fetchGraph();

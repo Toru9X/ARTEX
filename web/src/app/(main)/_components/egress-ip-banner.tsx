@@ -5,6 +5,7 @@ import * as React from "react";
 import { Globe2Icon, Loader2Icon, RefreshCwIcon, XIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import type { EgressCheck, EgressReport } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -64,16 +65,20 @@ export function EgressIpProvider({ children }: { children: React.ReactNode }) {
     };
   }, [probeForProxy]);
 
-  React.useEffect(() => {
-    if (!enabled) return;
-    const timer = window.setInterval(() => {
-      void api
-        .settings()
-        .then((settings) => probeForProxy(settings.global_proxy ?? ""))
-        .catch(() => undefined);
-    }, 10000);
-    return () => window.clearInterval(timer);
-  }, [enabled, probeForProxy]);
+  // `leading: false` matters here: each run sends a real request to the echo endpoint,
+  // and the effect above already probes once when the banner is switched on. On an
+  // engagement an unattended heartbeat to a public service is traffic the operator did
+  // not ask for, so mounting must not gain an extra probe. The visibility gate then
+  // cuts the probes sent while nobody is looking; the one it sends on the way back is
+  // for a banner someone is reading.
+  usePoll(
+    async () => {
+      const settings = await api.settings();
+      await probeForProxy(settings.global_proxy ?? "");
+    },
+    10000,
+    { enabled, leading: false },
+  );
 
   const setEnabled = React.useCallback(
     async (nextEnabled: boolean) => {

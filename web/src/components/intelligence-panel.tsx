@@ -20,6 +20,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import { statusMeta } from "@/lib/status";
 import type { IntelligenceKind, IntelligencePage, TaskIntelligence } from "@/lib/types";
@@ -95,38 +96,27 @@ export function IntelligencePanel({
     }, 300);
     return () => clearTimeout(timer);
   }, [search]);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: refresh explicitly reloads this resource after a user action.
-  React.useEffect(() => {
-    let alive = true;
-    let busy = false;
-    const load = async () => {
-      if (busy) return;
-      busy = true;
+  // The hidden-tab check this panel already did by hand now comes from usePoll,
+  // together with the overlap guard. resetKey carries what used to be the effect's
+  // dependency list: changing a filter refetches at once instead of on the next tick.
+  usePoll(
+    async (signal) => {
+      const params = new URLSearchParams({ limit: "25", offset: String(page * 25) });
+      if (kind !== "all") params.set("kind", kind);
+      if (status !== "all") params.set("status", status);
+      if (query) params.set("q", query);
       try {
-        const params = new URLSearchParams({ limit: "25", offset: String(page * 25) });
-        if (kind !== "all") params.set("kind", kind);
-        if (status !== "all") params.set("status", status);
-        if (query) params.set("q", query);
         const result = await api.intelligence(scope, scopeId, params);
-        if (alive) {
-          setData(result);
-          setError("");
-        }
+        if (signal.aborted) return;
+        setData(result);
+        setError("");
       } catch (e) {
-        if (alive) setError((e as Error).message);
-      } finally {
-        busy = false;
+        if (!signal.aborted) setError((e as Error).message);
       }
-    };
-    void load();
-    const timer = setInterval(() => {
-      if (!document.hidden) void load();
-    }, 8000);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
-  }, [scope, scopeId, kind, status, query, page, refresh]);
+    },
+    8000,
+    { resetKey: `${scope}|${scopeId}|${kind}|${status}|${query}|${page}|${refresh}` },
+  );
   const open = (item: TaskIntelligence) => setSelected(item);
   const close = () => setSelected(null);
   const navigate = () => {

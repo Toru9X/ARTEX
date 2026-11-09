@@ -41,6 +41,7 @@ import { SortableHead } from "@/components/ui/sortable-head";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import { useStoredSortPreference } from "@/lib/sort-preference";
 import type { TrafficDetail, TrafficExchange, TrafficHost, TrafficResp } from "@/lib/types";
@@ -197,6 +198,10 @@ export default function TrafficPage() {
 
   // Load the current page. Auto-refresh only on page 0 (newest) so paging back
   // through history isn't yanked out from under the user.
+  // Set by the effect below so the poll re-runs that effect's own fetch, cleared on
+  // teardown so a tick between runs cannot fetch with the filters we just left.
+  const loadRef = React.useRef<(() => void | Promise<void>) | null>(null);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: reloadTick is an explicit manual-refetch trigger.
   React.useEffect(() => {
     let alive = true;
@@ -227,15 +232,16 @@ export default function TrafficPage() {
         });
     };
     load();
-    const t = setInterval(() => {
-      if (page !== 0) return; // only auto-refresh the newest page
-      load();
-    }, 5000);
+    loadRef.current = load;
     return () => {
       alive = false;
-      clearInterval(t);
+      loadRef.current = null;
     };
   }, [page, size, hostQ, method, queryQ, bodyQ, pathQ, statusFilter, respMinQ, respMaxQ, sort, reloadTick]);
+
+  // Only the newest page auto-refreshes: an older page would shift under the reader.
+  // The leading fetch stays in the effect above, which owns the request's `alive` flag.
+  usePoll(() => loadRef.current?.(), 5000, { enabled: page === 0, leading: false });
 
   // Delete traffic for the current host filter (substring) or the checked
   // hosts (exact batch), then refetch.

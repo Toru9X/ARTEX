@@ -25,6 +25,7 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import type {
   InterceptApprovalFilter,
@@ -713,14 +714,16 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
   const latestLoad = React.useRef(load);
   latestLoad.current = load;
 
+  // `load` already carries its own request-id guard, and bumping it on teardown is what
+  // discards a reply that is still in flight for the filters we are leaving.
   React.useEffect(() => {
     void load();
-    const timer = setInterval(() => void load(), 5000);
     return () => {
       request.current++;
-      clearInterval(timer);
     };
   }, [load]);
+
+  usePoll(() => load(), 5000, { leading: false });
 
   const changePageSize = (next: number) => {
     setPageSize(next);

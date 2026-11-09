@@ -24,6 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { type ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { Progress } from "@/components/ui/progress";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import type {
   Activity,
@@ -197,130 +198,72 @@ export default function DashboardPage() {
   const [systemMetrics, setSystemMetrics] = React.useState<SystemMetrics | null>(null);
 
   // Polled on its own 5s timer: CPU is a delta between consecutive calls, so a
-  // steady cadence is what makes the reading meaningful.
-  React.useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const next = await api.systemMetrics();
-        if (alive) setSystemMetrics(next);
-      } catch {
-        /* keep the last reading and retry on the next tick */
-      }
-    };
-    void load();
-    const timer = setInterval(load, 5000);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
-  }, []);
+  // steady cadence is what makes the reading meaningful. While the tab is hidden
+  // nothing is asked for, and the first reading afterwards averages the gap —
+  // the server keeps the counter, so the number stays correct, just coarser.
+  usePoll(async (signal) => {
+    const next = await api.systemMetrics();
+    if (!signal.aborted) setSystemMetrics(next);
+  }, 5000);
 
   // The task list is the most expensive dashboard source. Poll it independently
-  // so a large history cannot hold back every other dashboard panel.
-  React.useEffect(() => {
-    let alive = true;
-    let loading = false;
-    let signature = "";
-    const load = async () => {
-      if (loading) return;
-      loading = true;
-      try {
-        const tr = await api.tasks();
-        if (!alive) return;
-        const nextSignature = JSON.stringify(tr.tasks);
-        if (nextSignature !== signature) {
-          signature = nextSignature;
-          setTasks(tr.tasks);
-        }
-      } catch {
-        /* transient errors — next poll retries */
-      } finally {
-        loading = false;
-      }
-    };
-    void load();
-    const t = setInterval(load, 5000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, []);
+  // so a large history cannot hold back every other dashboard panel. The
+  // signature lives in a ref because it has to survive across ticks, which a
+  // local would not now that the callback is rebuilt on every render.
+  const tasksSignature = React.useRef("");
+  usePoll(async (signal) => {
+    const tr = await api.tasks();
+    if (signal.aborted) return;
+    const nextSignature = JSON.stringify(tr.tasks);
+    if (nextSignature !== tasksSignature.current) {
+      tasksSignature.current = nextSignature;
+      setTasks(tr.tasks);
+    }
+  }, 5000);
 
   // The remaining fast sources stay batched so one poll causes a single render.
-  React.useEffect(() => {
-    let alive = true;
-    let loading = false;
-    const load = async () => {
-      if (loading) return;
-      loading = true;
-      try {
-        const [findings, stats, settings, pending, activity, tokens, conversationTokens] = await Promise.all([
-          api.findings(),
-          api.stats(),
-          api.settings(),
-          api.interceptPending(),
-          api.activity(undefined, { limit: 30 }),
-          api.tokenStats(),
-          api.conversationTokens(),
-        ]);
-        if (!alive) return;
-        setFindings(findings);
-        setStats(stats);
-        setSettings(settings);
-        setPending(pending);
-        setActivity(activity.items);
-        setTokens(tokens.total ?? null);
-        setConvTokens(conversationTokens);
-      } catch {
-        // Preserve stale data and retry on the next interval.
-      } finally {
-        loading = false;
-      }
-    };
-    void load();
-    const timer = setInterval(load, 5000);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
-  }, []);
+  usePoll(async (signal) => {
+    const [findings, stats, settings, pending, activity, tokens, conversationTokens] = await Promise.all([
+      api.findings(),
+      api.stats(),
+      api.settings(),
+      api.interceptPending(),
+      api.activity(undefined, { limit: 30 }),
+      api.tokenStats(),
+      api.conversationTokens(),
+    ]);
+    if (signal.aborted) return;
+    setFindings(findings);
+    setStats(stats);
+    setSettings(settings);
+    setPending(pending);
+    setActivity(activity.items);
+    setTokens(tokens.total ?? null);
+    setConvTokens(conversationTokens);
+  }, 5000);
 
   // slow poll: traffic, assets, system-static (every 15s)
-  React.useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const [traf, counts, agentList, mcpList, skillList, toolList, profileList, usage] = await Promise.all([
-          api.traffic(0, 50),
-          api.assetCounts(),
-          api.agents(),
-          api.mcpServers(),
-          api.skills(),
-          api.tools(),
-          api.llmProfiles(),
-          api.usageStats(365),
-        ]);
-        if (!alive) return;
-        setTraffic(traf.exchanges ?? []);
-        setAssetCounts(counts ?? {});
-        setAgents(agentList);
-        setMcpServers(mcpList);
-        setSkills(skillList);
-        setTools(toolList);
-        setLLMProfiles(profileList);
-        setUsageStats(usage);
-      } catch {
-        /* transient errors */
-      }
-    };
-    void load();
-    const t = setInterval(load, 15000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, []);
+  usePoll(async (signal) => {
+    const [traf, counts, agentList, mcpList, skillList, toolList, profileList, usage] = await Promise.all([
+      api.traffic(0, 50),
+      api.assetCounts(),
+      api.agents(),
+      api.mcpServers(),
+      api.skills(),
+      api.tools(),
+      api.llmProfiles(),
+      api.usageStats(365),
+    ]);
+    if (signal.aborted) return;
+    setTraffic(traf.exchanges ?? []);
+    setAssetCounts(counts ?? {});
+    setAgents(agentList);
+    setMcpServers(mcpList);
+    setSkills(skillList);
+    setTools(toolList);
+    setLLMProfiles(profileList);
+    setUsageStats(usage);
+  }, 15000);
 
   // ── derived ───────────────────────────────────────────────────────────────
 

@@ -15,6 +15,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import { type FindingSortField, filterAndSortFindings } from "@/lib/finding-severity";
 import { useStoredSortPreference } from "@/lib/sort-preference";
@@ -152,25 +153,14 @@ export function FindingsTab({ taskId }: { taskId: string }) {
     "desc",
   );
 
-  React.useEffect(() => {
-    let active = true;
-    const load = () => {
-      api
-        .findings(taskId)
-        .then((fs) => {
-          if (active) setFindings(fs);
-        })
-        .catch(() => {
-          // Keep the last successful snapshot during transient refresh failures.
-        });
-    };
-    load();
-    const t = setInterval(load, 3000);
-    return () => {
-      active = false;
-      clearInterval(t);
-    };
-  }, [taskId]);
+  usePoll(
+    async (signal) => {
+      const fs = await api.findings(taskId);
+      if (!signal.aborted) setFindings(fs); // otherwise keep the last good snapshot
+    },
+    3000,
+    { resetKey: taskId },
+  );
 
   const onStatus = React.useCallback(async (f: Finding, next: FindingStatus) => {
     if (f.inherited || !f.finding_id || next === f.status) return;

@@ -10,6 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import type { TaskCredential } from "@/lib/types";
 
@@ -36,12 +37,8 @@ export function CredentialsTab({ taskId }: { taskId: string }) {
       .catch((e) => setError((e as Error).message));
   }, [taskId]);
 
-  React.useEffect(() => {
-    load();
-    // Agent runs can record credentials mid-task; a light poll keeps the tab current.
-    const timer = setInterval(load, 15000);
-    return () => clearInterval(timer);
-  }, [load]);
+  // Agent runs can record credentials mid-task; a light poll keeps the tab current.
+  usePoll(() => load(), 15000, { resetKey: taskId });
 
   async function add() {
     if (!domain.trim() || !username.trim()) return;

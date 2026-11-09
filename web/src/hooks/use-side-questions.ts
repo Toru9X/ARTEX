@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { toast } from "sonner";
 
+import { usePoll } from "@/hooks/use-poll";
 import { sseUrl } from "@/lib/api";
 import { isBtwCommand, type SideExchange, type SideHistory, sideAPI } from "@/lib/side-questions";
 
@@ -117,12 +118,7 @@ export function useSideQuestions(parent: string | null) {
     };
   }, [parent]);
 
-  useEffect(() => {
-    if (!open || !parent) return;
-    void load();
-    const timer = setInterval(() => void load(), 2000);
-    return () => clearInterval(timer);
-  }, [open, parent, load]);
+  usePoll(() => load(), 2000, { enabled: open && !!parent, resetKey: parent });
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Reconnect after a clear attempt invalidates older callbacks.
   useEffect(() => {

@@ -37,6 +37,7 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import type { LLMProfile, Task } from "@/lib/types";
 
@@ -226,24 +227,14 @@ function TaskDetailInner() {
       .catch(() => setProfiles([]));
   }, []);
 
-  React.useEffect(() => {
-    let alive = true;
-    const load = () =>
-      api
-        .interceptTask(id)
-        .then((rows) => {
-          if (alive) setInterceptPendingCount(rows.filter((r) => r.status === "pending").length);
-        })
-        .catch(() => {
-          // Polling is best-effort; the next interval retries automatically.
-        });
-    void load();
-    const t = setInterval(load, 5000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, [id]);
+  usePoll(
+    async (signal) => {
+      const rows = await api.interceptTask(id);
+      if (!signal.aborted) setInterceptPendingCount(rows.filter((r) => r.status === "pending").length);
+    },
+    5000,
+    { resetKey: id },
+  );
 
   const taskLoadInFlight = React.useRef<string | null>(null);
   const load = React.useCallback(() => {
@@ -274,11 +265,10 @@ function TaskDetailInner() {
         }
       });
   }, [id]);
-  React.useEffect(() => {
-    load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
-  }, [load]);
+  // The header's own cadence. It used to run beside each tab's separate timer, so
+  // the counts up here and the list below could disagree for a few seconds; both
+  // now pause together while the tab is hidden and refresh together on return.
+  usePoll(() => load(), 5000, { resetKey: id });
 
   async function togglePause() {
     if (task && ["done", "failed", "timeout"].includes(task.status)) return;

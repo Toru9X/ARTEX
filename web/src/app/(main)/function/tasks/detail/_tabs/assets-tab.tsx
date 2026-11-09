@@ -38,6 +38,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import { parseCompanyScopeText } from "@/lib/company-scope";
 import { taskAssetSourceLabel } from "@/lib/task-assets";
@@ -375,6 +376,10 @@ export function AssetsTab({ taskId }: { taskId: string }) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: these controls intentionally reset server pagination.
   React.useEffect(() => setPage(0), [tab, size, query]);
 
+  // Set by the effect below so the poll re-runs that effect's own fetch, cleared on
+  // teardown so a tick between runs cannot fetch for the query we just left.
+  const loadRef = React.useRef<(() => void | Promise<void>) | null>(null);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is an explicit manual-reload trigger.
   React.useEffect(() => {
     let active = true;
@@ -413,15 +418,19 @@ export function AssetsTab({ taskId }: { taskId: string }) {
         }
       }
     };
-    // Debounce DSL keystrokes; plain (re)loads and polling run immediately.
+    // Debounce DSL keystrokes; plain (re)loads run immediately.
     const debounce = setTimeout(() => void load(), dsl ? 400 : 0);
-    const timer = setInterval(() => void load(), 10_000);
+    loadRef.current = load;
     return () => {
       active = false;
+      loadRef.current = null;
       clearTimeout(debounce);
-      clearInterval(timer);
     };
   }, [page, query, refreshKey, size, tab, taskId]);
+
+  // Polling runs the same fetch, undebounced: the debounce only exists to hold back a
+  // half-typed DSL, and by the time a tick fires the query has long settled.
+  usePoll(() => loadRef.current?.(), 10_000, { leading: false });
 
   React.useEffect(() => {
     const maxPage = Math.max(0, Math.ceil(total / size) - 1);

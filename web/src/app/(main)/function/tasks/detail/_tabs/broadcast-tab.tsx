@@ -28,6 +28,7 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/h
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import { type Tone, toneClasses, toneDot } from "@/lib/status";
 import { taskAssetTypeLabel } from "@/lib/task-assets";
@@ -457,11 +458,12 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
   // leaving the list alone so content does not shift under pagination/expand.
   const atLive = page === 1 && order === "desc";
 
-  React.useEffect(() => {
-    setNow(Date.now());
-    const t = setInterval(() => setNow(Date.now()), 30000);
-    return () => clearInterval(t);
-  }, []);
+  // Only feeds the relative timestamps, which nobody is reading in a hidden tab.
+  usePoll(() => setNow(Date.now()), 30000);
+
+  // Set by the fetch effect below so the poll re-runs that effect's own `load`, cleared
+  // on teardown so a tick between runs cannot fetch for the stream we just left.
+  const loadRef = React.useRef<(() => void | Promise<void>) | null>(null);
 
   // Input debounce: the query fires 300ms after typing stops, and returns to page 1.
   React.useEffect(() => {
@@ -472,6 +474,7 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
     return () => clearTimeout(t);
   }, [queryInput]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `live` is read by the poll below, but switching it back on must refetch at once rather than wait out an interval
   React.useEffect(() => {
     let alive = true;
     let rendered = false; // whether this query has already rendered its content
@@ -514,17 +517,17 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
           // Polling is best-effort: keep the last successful broadcast content and retry automatically next round.
         });
     void load();
-    if (!live) {
-      return () => {
-        alive = false;
-      };
-    }
-    const timer = setInterval(load, POLL_MS);
+    loadRef.current = load;
     return () => {
       alive = false;
-      clearInterval(timer);
+      loadRef.current = null;
     };
   }, [taskId, page, size, kinds, query, order, live, atLive]);
+
+  // The poll runs the effect's own `load`, so it keeps that run's `rendered` flag —
+  // the one that stops a non-live seat from re-rendering content under the reader.
+  // The leading fetch stays in the effect, which owns the stream-switch reset.
+  usePoll(() => loadRef.current?.(), POLL_MS, { enabled: live, leading: false });
 
   const toggleKind = (kind: ExploreKind) => {
     setKinds((cur) => (cur.includes(kind) ? cur.filter((k) => k !== kind) : [...cur, kind]));

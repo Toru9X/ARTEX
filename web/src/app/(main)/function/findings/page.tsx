@@ -41,6 +41,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { SEVERITY_FILTER_OPTIONS, statusMeta } from "@/lib/status";
@@ -598,6 +599,10 @@ export default function FindingsPage() {
   // Poll only the current view: the flat view its page, the grouped view the headers and each expanded group (whose pagers are independent).
   // The asset view is queried once (see the return below); its left tree is navigation, not worth recomputing every 5 seconds.
   // Wait for preferences to hydrate before the first request, or the default view/filter would be fetched for nothing.
+  // Set by the effect below so the poll re-runs that effect's own refresh, cleared on
+  // teardown so a tick between runs cannot fetch for the view we just left.
+  const refreshRef = React.useRef<(() => void | Promise<void>) | null>(null);
+
   React.useEffect(() => {
     if (!preferencesHydrated) return;
     void activeRetestFingerprint; // The asset view, polled irregularly, also refreshes its triage state after a retest.
@@ -614,10 +619,18 @@ export default function FindingsPage() {
       }
     };
     refresh();
-    if (view === "asset") return;
-    const timer = setInterval(refresh, 5000);
-    return () => clearInterval(timer);
+    refreshRef.current = refresh;
+    return () => {
+      refreshRef.current = null;
+    };
   }, [activeRetestFingerprint, loadFlat, loadGroup, preferencesHydrated, refreshGroups, view]);
+
+  // The asset view is queried once (see above), so it keeps the leading fetch and skips
+  // the timer; the leading fetch itself stays in the effect, which owns `refresh`.
+  usePoll(() => refreshRef.current?.(), 5000, {
+    enabled: preferencesHydrated && view !== "asset",
+    leading: false,
+  });
 
   React.useEffect(() => {
     const lastPage = Math.max(1, Math.ceil(groupTotal / pageSize));
@@ -632,28 +645,12 @@ export default function FindingsPage() {
 
   // Whole-table aggregates (stat cards + vuln-class options) — independent of the
   // current page, so they stay exact.
-  React.useEffect(() => {
-    let alive = true;
-    const load = () => {
-      api
-        .findingStats()
-        .then((s) => {
-          if (alive) {
-            setStats(s);
-            setStatsLoaded(true);
-          }
-        })
-        .catch(() => {
-          // Keep the previous aggregate snapshot until the next poll.
-        });
-    };
-    load();
-    const t = setInterval(load, 5000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, []);
+  usePoll(async (signal) => {
+    const s = await api.findingStats();
+    if (signal.aborted) return; // keep the previous aggregate snapshot
+    setStats(s);
+    setStatsLoaded(true);
+  }, 5000);
 
   React.useEffect(() => {
     if (!statsLoaded) return;

@@ -21,6 +21,8 @@ import type {
   FindingRetest,
   FindingTraffic,
   FindingTrafficBinding,
+  IntelligenceKind,
+  IntelligencePage,
   IntentAsset,
   ScopeRow,
   Task,
@@ -28,6 +30,7 @@ import type {
   TaskAssetMutation,
   TaskAssetScopeMutation,
   TaskCategory,
+  TaskIntelligence,
   TaskLLMResolution,
   TaskScopeRow,
   TaskTemplate,
@@ -227,6 +230,86 @@ let mockActiveTask = D.ACTIVE_TASK;
 
 function mockTaskAssetSourceKey(taskID: string, assetID: number): string {
   return JSON.stringify([taskID, assetID]);
+}
+
+// Intelligence fixture for the mock console, newest id first to match the real
+// ORDER BY i.id DESC. Only the demo task carries rows; any other task, and the asset
+// scope, return an empty page — which is still a page, with its counts zero-filled.
+function mockIntelligence(scope: string, id: string): TaskIntelligence[] {
+  if (scope !== "tasks" || id !== "t-acme-web") return [];
+  const taskID = mockTaskAssetID(id) ?? 0;
+  const item = (
+    seed: Pick<TaskIntelligence, "id" | "kind" | "title" | "content" | "evidence" | "confidence" | "status"> &
+      Partial<TaskIntelligence>,
+  ): TaskIntelligence => ({
+    task_id: taskID,
+    asset_ids: [],
+    worker: "worker",
+    created_at: "2026-08-20T09:12:00Z",
+    updated_at: "2026-08-20T09:12:00Z",
+    inherited: false,
+    ...seed,
+  });
+  return [
+    item({
+      id: 5,
+      kind: "sensitive_data",
+      title: "Order API returns another customer's phone number and address",
+      content:
+        "GET /api/v2/orders/10493 answers with buyer_phone and ship_address for an order the session does not own.",
+      evidence: 'HTTP/1.1 200 OK\n{"order_id":10493,"buyer_phone":"+84•••••1182","ship_address":"…"}',
+      confidence: "observed",
+      status: "confirmed",
+      asset_ids: [3],
+      updated_at: "2026-08-20T10:41:00Z",
+    }),
+    item({
+      id: 4,
+      kind: "lead",
+      title: "Admin console exposes a bulk export endpoint",
+      content: "/admin/export?type=users is referenced from admin.js but was never exercised.",
+      evidence: 'admin.js:412  fetch("/admin/export?type=" + type)',
+      confidence: "inferred",
+      status: "in_progress",
+      asset_ids: [6],
+      created_at: "2026-08-20T08:03:00Z",
+      updated_at: "2026-08-20T09:55:00Z",
+    }),
+    item({
+      id: 3,
+      kind: "credential",
+      title: "Service account found in a stale backup config",
+      content: "svc_report / Rep0rt!2024 — recovered from /backup/config.old.",
+      evidence: "db.user=svc_report\ndb.pass=Rep0rt!2024",
+      confidence: "observed",
+      status: "verified",
+      created_at: "2026-08-19T17:55:00Z",
+      updated_at: "2026-08-20T07:20:00Z",
+    }),
+    item({
+      id: 2,
+      kind: "credential",
+      title: "Default operator login accepted on the staging admin",
+      content: "admin / admin reached the dashboard on admin.acme.com before MFA was prompted.",
+      evidence: "POST /admin/login → 302 /admin/dashboard",
+      confidence: "observed",
+      status: "unverified",
+      asset_ids: [6],
+      created_at: "2026-08-19T16:02:00Z",
+      updated_at: "2026-08-19T16:02:00Z",
+    }),
+    item({
+      id: 1,
+      kind: "lead",
+      title: "Password reset tokens look sequential",
+      content: "Two resets a minute apart produced tokens differing in the last four characters.",
+      evidence: "t=9f2a0041 / t=9f2a0045",
+      confidence: "inferred",
+      status: "pending",
+      created_at: "2026-08-19T11:30:00Z",
+      updated_at: "2026-08-19T11:30:00Z",
+    }),
+  ];
 }
 
 function publicMockTaskArchive(archive: MockTaskArchive): TaskArchive {
@@ -1778,6 +1861,41 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     deleteMockTaskAssetSources(seg[1], asset.id);
     return { detached: asset.id };
   }
+  // GET /{tasks|assets}/{id}/intelligence — the one route whose absence actually broke a
+  // page: the fallthrough default ({}) is truthy, so the panel read `.counts` off it and
+  // threw. ListIntelligence in db/intelligence.go always ships items/total/counts, with
+  // all three kinds zero-filled, so the mock promises exactly that much.
+  if ((seg[0] === "tasks" || seg[0] === "assets") && seg[2] === "intelligence" && seg.length === 3 && m === "GET") {
+    const all = mockIntelligence(seg[0], seg[1]);
+    // Counts are the per-kind totals for the scope and ignore the filters below — they
+    // label the filter chips, so filtering by one kind must not empty the others.
+    const counts: Record<IntelligenceKind, number> = { credential: 0, lead: 0, sensitive_data: 0 };
+    for (const item of all) counts[item.kind]++;
+    const kind = q.get("kind") ?? "";
+    const status = q.get("status") ?? "";
+    const needle = (q.get("q") ?? "").trim().toLowerCase();
+    const matched = all.filter(
+      (item) =>
+        (!kind || item.kind === kind) &&
+        (!status || item.status === status) &&
+        (!needle ||
+          [item.title, item.content, item.evidence, item.worker].some((field) => field.toLowerCase().includes(needle))),
+    );
+    const limit = Number(q.get("limit")) || 25;
+    const offset = Math.max(0, Number(q.get("offset")) || 0);
+    const page: IntelligencePage = {
+      items: structuredClone(matched.slice(offset, offset + limit)),
+      total: matched.length,
+      counts,
+      enabled: true,
+      // Off on purpose: there is no extractor behind the mock, and claiming the agent
+      // is on leaves every credential row reading "Waiting for credential extraction".
+      credential_agent_enabled: false,
+      credential_traffic_binding: false,
+    };
+    return page;
+  }
+
   if (seg[0] === "tasks" && seg[2] === "intent-assets" && seg.length === 3 && m === "GET") {
     let mappings: Array<{ intentID: string; assetID: number; summary: string }> = [];
     if (seg[1] === "t-acme-web") {

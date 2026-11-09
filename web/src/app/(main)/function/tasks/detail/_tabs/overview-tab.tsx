@@ -27,6 +27,7 @@ import { Input } from "@/components/ui/input";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
+import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import type {
   AssetInterceptKind,
@@ -347,13 +348,19 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     }
   };
 
+  // The scope is fetched once per task rather than polled: it only moves when the
+  // user edits it here, and that path refreshes it itself.
   React.useEffect(() => {
-    let cancelled = false;
-    let loading = false;
+    void loadScope();
+  }, [loadScope]);
 
-    const load = async () => {
-      if (loading) return;
-      loading = true;
+  usePoll(
+    async (signal) => {
+      // Independent of the batch below and of each other; each keeps its last good
+      // value on failure, so none of them is awaited here.
+      void loadTokens();
+      void loadGoals();
+      void loadConstraints();
       try {
         const [taskResp, statsResp, intentsResp, findingsResp] = await Promise.all([
           api.task(taskId),
@@ -361,7 +368,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           api.intents(taskId),
           api.findings(taskId),
         ]);
-        if (cancelled) return;
+        if (signal.aborted) return;
         const activeTask = statsResp.active_task;
         setTask(
           activeTask
@@ -383,34 +390,18 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         api
           .taskCoverage(taskId)
           .then((c) => {
-            if (!cancelled) setCoverage(c);
+            if (!signal.aborted) setCoverage(c);
           })
           .catch(() => {
             // A transient coverage failure is retried by the next poll.
           });
       } catch {
         // transient errors are ignored; the next poll will retry
-      } finally {
-        loading = false;
       }
-    };
-
-    void load();
-    void loadScope();
-    void loadTokens();
-    void loadGoals();
-    void loadConstraints();
-    const timer = setInterval(() => {
-      void load();
-      void loadTokens();
-      void loadGoals();
-      void loadConstraints();
-    }, 3000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [taskId, loadScope, loadTokens, loadGoals, loadConstraints]);
+    },
+    3000,
+    { resetKey: taskId },
+  );
 
   const running = intents.filter((i) => i.state === "running");
   const open = intents.filter((i) => i.state === "open");
