@@ -16,6 +16,14 @@ func TestPromptSeedsCarryAdversarialGate(t *testing.T) {
 				"Eliminations need evidence at the same bar as confirmations",
 				"Do not merge distinct candidates",
 				"Zero confirmed findings is a valid outcome",
+				// A filter parameter the server silently ignores returns the caller's
+				// own authorized view for every value, which reads exactly like a
+				// cross-object leak. The control probe and the vantage-point rule are
+				// what separate the two, so they must survive prompt edits.
+				"six axes",
+				"**attribution**",
+				"Attribution control",
+				"Access control — name the vantage point",
 			} {
 				if !strings.Contains(tmpl, marker) {
 					t.Errorf("%s seed missing adversarial-gate marker %q", name, marker)

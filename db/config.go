@@ -770,6 +770,19 @@ func (d *DB) CurrentPrompt(agentID int64) (string, error) {
 	return tmpl.String, err
 }
 
+// CurrentPromptAuthor returns updated_by for the agent's active prompt version:
+// "system" for anything seeded or migrated by the server, "ui" for a version the
+// user saved on the agent page, "" when no version is set. A prompt migration
+// reads it to leave an edited prompt alone instead of superseding it.
+func (d *DB) CurrentPromptAuthor(agentID int64) (string, error) {
+	var by sql.NullString
+	err := d.QueryRow(`SELECT p.updated_by FROM agents a JOIN agent_prompts p ON p.id=a.current_prompt_id WHERE a.id=$1`, agentID).Scan(&by)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return by.String, err
+}
+
 // SeedPromptIfEmpty writes the code-default template as the agent's first prompt
 // version ONLY when it has none yet (current_prompt_id IS NULL). Mirrors
 // SeedTool's first-insert-only philosophy: a user's edited prompt is never

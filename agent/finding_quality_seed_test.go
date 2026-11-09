@@ -27,6 +27,12 @@ func TestPromptSeedsCarryFindingQualityGates(t *testing.T) {
 		"## Measured impact",
 		"denominator",
 		"claim, not a measurement",
+		// A report is trustworthy when a reader can tell what was ruled out and what
+		// was never established. These three sections carry that, and the controls
+		// section is what a reviewer checks first on an access-control finding.
+		"## Intended access",
+		"## Negative controls",
+		"## Limitations",
 	} {
 		if !strings.Contains(ReporterDefaultPrompt, marker) {
 			t.Errorf("reporter prompt missing measured-impact marker %q", marker)

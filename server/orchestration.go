@@ -566,8 +566,10 @@ func (s *Server) seedOrchestrationTools() {
 	s.reseedPlannerPrompt()           // planner prompt: rewrites the "zero intents" justification rules + adds quantitative acceptance checks (one-time)
 	s.reseedWorkerPrompt()            // worker prompt: adds the evidence bar for negative conclusions (one-time)
 	s.seedReporterAgent()             // seeds the "report writer" agent + tool bindings + finding trigger (one-time)
+	s.reseedAttributionGate()         // worker/pentest gain the attribution axis, reporter the controls/limitations sections; skips prompts edited in the UI (one-time)
 	s.upgradeReporterTriggerMessage() // backfill migration for old DBs: makes the reporter send evidence_version back (one-time)
 	s.seedFindingTrafficTools()       // adds optional evidence params and read-only evidence tools, preserving user config
+	s.seedFindingSeverityEnum()       // declares report_finding's severity vocabulary on rows seeded before it was an enum (one-time)
 	s.seedFindingWorkflowTools()
 	if s.m.pg.GetBool(settingBrowserScreenshot, false) {
 		// Re-apply the opt-in after startup seeding, so an existing database gets
@@ -732,6 +734,50 @@ func (s *Server) reseedPlannerPrompt() {
 // and tightened per-item facts arrays to the rare exception of "fully independent of each other, impossible to merge". Bumped the flag to v3 so existing old DBs refresh once more.
 // SeedPromptIfEmpty is first-insert-only; versions already in old DBs never got it, so version management [appends a new version] and switches to it; old versions stay in history and can be recovered.
 // settings flag guard → done only once. Fresh DBs need nothing. Structurally identical to reseedGoalsPrompt.
+// reseedAttributionGate carries the attribution axis and the two access-control
+// bullets (agent/worker.go, agent/promptcatalog.go) and the reporter's intended
+// access / negative controls / limitations sections onto databases seeded before
+// them. SeedPromptIfEmpty writes a default only when an agent has none, so an
+// existing install would otherwise keep running the old gate.
+//
+// Unlike the earlier prompt migrations this one refuses to supersede a prompt the
+// user edited on the agent page (updated_by "ui"): their wording stays active and
+// the log says which agent to reset by hand. A superseded version is never lost —
+// SavePrompt appends, so the previous one stays in the agent's history.
+func (s *Server) reseedAttributionGate() {
+	const flag = "prompt_attribution_gate_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // attempt only once regardless of outcome
+	seeds := agent.BuiltinPromptSeeds()
+	for _, key := range []string{"worker", "pentest", "reporter"} {
+		tmpl := seeds[key]
+		if key == "reporter" {
+			tmpl = agent.ReporterDefaultPrompt
+		}
+		if tmpl == "" {
+			continue
+		}
+		a, err := s.m.pg.GetAgentByKey(key)
+		if err != nil || a == nil {
+			continue // fresh DB without agent rows yet: the first seeding writes the new default directly
+		}
+		if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
+			continue // already the current default
+		}
+		if by, err := s.m.pg.CurrentPromptAuthor(a.ID); err == nil && by == "ui" {
+			log.Printf("[prompts] %s prompt was edited on the agent page, so the attribution gate was not applied to it — reset it to the built-in default there to pick up the new adversarial axis", key)
+			continue
+		}
+		if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
+			log.Printf("[prompts] failed to refresh the %s prompt to the new default: %v", key, err)
+			continue
+		}
+		log.Printf("[prompts] %s prompt: appended a new default version (attribution axis + access-control vantage point; reporter also gains intended access / negative controls / limitations, one-time)", key)
+	}
+}
+
 func (s *Server) reseedWorkerPrompt() {
 	const flag = "worker_prompt_compact_v4"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
