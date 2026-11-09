@@ -19,8 +19,8 @@ func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
 func newFakeClock() *fakeClock { return &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)} }
 
-// oldPassword is 8 characters: valid under the old minimum, too short for a new password now.
-const oldPassword = "abcd1234"
+// oldPassword is 7 characters: valid for an existing hash, too short for a new password now.
+const oldPassword = "abcd123"
 
 // loginServer returns a Server whose login reads a stored hash of oldPassword
 // from a stub instead of PostgreSQL.
@@ -231,20 +231,20 @@ func TestLoginRateLimitBehindTrustedProxy(t *testing.T) {
 	}
 }
 
-// The 12-character minimum applies to new passwords only. A hash stored under the
-// old 8-character minimum must still log in.
-func TestEightCharPasswordLogsInButIsRejectedAsNew(t *testing.T) {
-	if n := len([]rune(oldPassword)); n != 8 {
-		t.Fatalf("oldPassword has %d characters, want 8", n)
+// The minimum length applies to new passwords only. A hash stored under an earlier,
+// shorter minimum must still log in.
+func TestShortPasswordLogsInButIsRejectedAsNew(t *testing.T) {
+	if n := len([]rune(oldPassword)); n >= minPasswordRunes {
+		t.Fatalf("oldPassword has %d characters, want fewer than the %d-character minimum", n, minPasswordRunes)
 	}
 	_, post := loginServer(t, newFakeClock())
 	w := post("192.0.2.14:40000", oldPassword, nil)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"token"`) {
-		t.Fatalf("login with an existing 8-character password: status=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("login with an existing short password: status=%d body=%s", w.Code, w.Body.String())
 	}
 	// authInit and authChangePassword both refuse a new password through validatePassword.
 	if msg := validatePassword(oldPassword); msg == "" {
-		t.Fatal("validatePassword accepted an 8-character new password")
+		t.Fatal("validatePassword accepted a new password below the minimum")
 	}
 }
 

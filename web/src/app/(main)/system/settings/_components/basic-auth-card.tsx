@@ -105,7 +105,7 @@ export function BasicAuthCard() {
                 required={enabled && !passwordSet}
                 disabled={!loaded || saving}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={passwordSet ? "set; leave empty to keep it" : "at least 12 characters, at most 72 bytes"}
+                placeholder={passwordSet ? "set; leave empty to keep it" : "at least 8 characters, at most 72 bytes"}
               />
               <FieldDescription>
                 Independent of the ARTEX login password. Use HTTPS when it is reachable from the internet.

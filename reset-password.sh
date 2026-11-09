@@ -14,7 +14,7 @@
 #
 # Usage examples:
 #   ./reset-password.sh                          # local, auto-reads config.json/env, prompts for the new password
-#   ./reset-password.sh -p 'New-Passphrase!'     # local, new password given directly (at least 12 characters)
+#   ./reset-password.sh -p 'New-Passphrase!'     # local, new password given directly (at least 8 characters)
 #   ./reset-password.sh --dsn postgres://u:p@h:5432/artex
 #   ./reset-password.sh -H 127.0.0.1 -P 5433 -U autopentest -W pass -d artex
 #   ./reset-password.sh -m docker                # docker deployment (reads POSTGRES_* from .env)
@@ -133,7 +133,7 @@ fi
 # Same minimum as the server (minPasswordRunes in server/auth.go), counted in
 # characters like the server: UTF-8 bytes minus continuation bytes, whatever the locale.
 NEWPASS_CHARS=$(printf '%s' "$NEWPASS" | LC_ALL=C tr -d '\200-\277' | wc -c)
-(( NEWPASS_CHARS >= 12 )) || die "password must be at least 12 characters"
+(( NEWPASS_CHARS >= 8 )) || die "password must be at least 8 characters"
 
 # Hand the password to psql via environment variable (read with \getenv, never in argv/ps)
 export ARTEX_RESET_NEWPASS="$NEWPASS"
