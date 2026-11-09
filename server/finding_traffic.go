@@ -23,6 +23,27 @@ func (s *Server) evidenceStore() *evidence.Store {
 	return evidence.New(s.m.pg, s.m.traffic, filepath.Join(s.m.dir, "evidence"))
 }
 
+// seedFindingSeverityEnum declares report_finding's severity vocabulary on
+// databases seeded before it was an enum. SeedTool inserts once (ON CONFLICT DO
+// NOTHING), so an existing row keeps the old free-string property and the model
+// never sees the four allowed values. Only the "enum" key is written, and only
+// when absent: an edited description stays as the user wrote it, and a row whose
+// severity property was removed is left alone (jsonb_set cannot create the
+// parent). The handler in agent/tools.go validates regardless of this row, so a
+// failure here costs the hint, not the guarantee.
+func (s *Server) seedFindingSeverityEnum() {
+	const flag = "finding_severity_enum_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	if _, err := s.m.pg.Exec(`UPDATE tools SET schema=jsonb_set(schema,'{properties,severity,enum}','["critical","high","medium","low"]'::jsonb,true),updated_at=now()
+WHERE key='report_finding' AND system AND schema->'properties' ? 'severity' AND NOT(schema->'properties'->'severity' ? 'enum')`); err != nil {
+		log.Printf("[findings] declare the severity enum on report_finding: %v", err)
+		return
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
+}
+
 // Add only new optional properties; preserve edited descriptions, existing
 // properties, agent bindings and disabled flags. The one-time flag also keeps
 // subsequent user unbinding of the evidence reader intact.

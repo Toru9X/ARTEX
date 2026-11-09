@@ -1350,9 +1350,23 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 
 // --- worker write tools ---
 
+// normalizeSeverity folds a model-supplied severity to the stored vocabulary
+// (critical / high / medium / low), reporting whether the result is one of them.
+// Case and surrounding spaces are the whole tolerance: anything else is a value
+// the readers cannot rank or count, so the caller refuses it.
+func normalizeSeverity(s string) (string, bool) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return s, db.ValidSeverity(s)
+}
+
 func (t *ToolSet) addFinding() actool.CoreTool {
 	return writeTool("report_finding", "Record a confirmed finding, with evidence providing verifiable proof such as command output and logs. In a task context, pass the current intent_id. The returned finding_id is the standalone finding record ID; finding_node_id is the exploration node ID (the first line keeps that node number).", obj(map[string]any{
-		"vulnclass": str("vulnerability class"), "name": str("vulnerability name"), "severity": str("critical|high|medium|low"), "summary": str("finding summary"),
+		"vulnclass": str("vulnerability class"), "name": str("vulnerability name"),
+		// enum, not a free string: findings.severity has no CHECK and every reader
+		// matches the four values exactly. Declaring them lets the provider keep the
+		// model inside the vocabulary; the handler still folds case and refuses the rest.
+		"severity":  map[string]any{"type": "string", "description": "finding severity", "enum": []string{"critical", "high", "medium", "low"}},
+		"summary":   str("finding summary"),
 		"intent_id": idp("the current task's intent id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "affected asset ids"},
 		"evidence":         str("evidence/PoC text"),
 		"evidence_hint_id": idp("optional: the hint node ID in this task corresponding to this finding; automatically carries its structured traffic_refs; cannot reference an inherited hint or another finding's hint"),
@@ -1381,6 +1395,20 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if !findingTrafficBindingEnabled() {
 			a.TrafficRefs, a.EvidenceHintID = nil, nil
 		}
+		// severity is a plain string parameter, so models emit "High", " critical ",
+		// or a word outside the vocabulary. findings.severity carries no CHECK
+		// (db/schema.sql: "validated by a server-side whitelist") and every reader
+		// matches it exactly — the severity filter, the COUNT(*) FILTER buckets, and
+		// both sort ranks, where an unknown value lands at opposite ends (most severe
+		// in report/report.go, least in the web UI). This tool is the one boundary
+		// every real caller passes through, so fold case and spacing here and refuse
+		// what is still unknown rather than storing a finding that silently drops out
+		// of every severity view.
+		severity, ok := normalizeSeverity(a.Severity)
+		if !ok {
+			return actool.Errorf(fmt.Sprintf("severity must be one of critical / high / medium / low (got %q); nothing was registered — call report_finding again with a valid severity", a.Severity)), nil
+		}
+		a.Severity = severity
 		if len(a.EvidenceHintID) > 0 && pid(a.EvidenceHintID) <= 0 {
 			return actool.Errorf("evidence_hint_id must be a valid hint node ID; omit it when there is no handover hint"), nil
 		}
