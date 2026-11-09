@@ -1,3 +1,9 @@
+# engagement output (reports, evidence, raw request/response) — real customer
+# data, and git history is the one place it must never land: deleting it in a
+# later commit does not remove it. Only the convention README is tracked.
+/output/*
+!/output/README.md
+
 # backend
 /data/
 *.db
