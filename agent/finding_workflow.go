@@ -8,6 +8,8 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
+const trafficIDGuidance = "\n\n**Traffic ID Convention**: The traffic ID displayed/copied in the traffic UI is identical to the id returned by traffic_search, and is the raw string used by traffic_get(id) and traffic_refs[].traffic_id. It is not a list row number, and does not change with pagination, sorting, or filtering. When handed a complete ID, prefer reading and verifying it directly with traffic_get without rewriting, truncating, or guessing the ID; when citing traffic evidence in reports, retain the corresponding full ID for convenient lookup from the traffic UI."
+
 const findingIDGuidance = "\n\n**Finding ID conventions**: finding_id is the standalone vulnerability record ID; finding_node_id is the exploration node ID. The id returned by list_findings / list_task_findings / node_detail / get_task_node_detail remains the exploration node ID; read the standalone ID from the finding_id in the same response. get_finding_traffic / bind_finding_traffic use the standalone finding_id. The legacy update_finding_report's finding_id parameter still takes finding_node_id. Do not feed the number on the first line of report_finding to the evidence tools, and do not guess other numbers after an ID error."
 
 // The server supplies the persisted setting. A missing setting/host is off.
@@ -80,7 +82,7 @@ func findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.Co
 		guidance += findingVerificationGuidance
 	}
 	if guidance != "" || has["get_finding_traffic"] || has["update_finding_report"] {
-		guidance += findingIDGuidance
+		guidance += trafficIDGuidance + findingIDGuidance
 	}
 	return out, guidance
 }

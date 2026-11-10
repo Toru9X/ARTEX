@@ -2371,8 +2371,9 @@ func (s *Server) resolveAssetIDs(ids []int64) map[int64]*db.Asset {
 
 // findingStats serves the whole-table aggregates (stat cards + vuln-class filter)
 // for the paginated Findings page.
+// findingStats serves filtered, pagination-independent counts and global options.
 func (s *Server) findingStats(w http.ResponseWriter, r *http.Request) {
-	st, err := s.m.pg.FindingStats()
+	st, err := s.m.pg.FilteredFindingStats(findingFilterFromQuery(r.URL.Query()))
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

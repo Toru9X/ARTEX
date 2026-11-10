@@ -572,6 +572,7 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 // cards and vuln-class filter — computed server-side so it stays exact
 // regardless of pagination.
 type FindingStats struct {
+	Distinct    *FindingDistinctStats `json:"distinct,omitempty"`
 	Total       int                 `json:"total"`
 	Pending     int                 `json:"pending"`
 	Critical    int                 `json:"critical"`
@@ -674,6 +675,42 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 		st.VulnClasses = append(st.VulnClasses, vulnclass)
 	}
 	sort.Strings(st.VulnClasses)
+	return st, nil
+}
+
+// FilteredFindingStats uses the same row and asset filters as the findings list.
+// Options remain global so choosing a filter never removes other choices.
+// Counts cover matching hot rows, exactly like ListFindingCases; archive-only
+// aggregates cannot be filtered by record content and are not list results.
+func (d *DB) FilteredFindingStats(filter FindingFilter) (*FindingStats, error) {
+	st, err := d.FindingStats()
+	if err != nil {
+		return nil, err
+	}
+	filter, err = d.applyAssetScope(filter)
+	if err != nil {
+		return nil, err
+	}
+	where, args := filter.where()
+	st.Distinct = new(FindingDistinctStats)
+	err = d.QueryRow(`SELECT COUNT(*),
+		COUNT(*) FILTER (WHERE f.status='pending'),
+		COUNT(*) FILTER (WHERE f.severity='critical'),
+		COUNT(*) FILTER (WHERE f.severity='high'),
+		COUNT(*) FILTER (WHERE f.severity='medium'),
+		COUNT(*) FILTER (WHERE f.severity='low'),
+		COUNT(DISTINCT CASE WHEN m.case_id IS NULL THEN 'f:'||f.id ELSE 'c:'||m.case_id END)
+		FROM findings f LEFT JOIN tasks t ON t.id=f.task_id
+		LEFT JOIN finding_case_members m ON m.finding_id=f.id`+where, args...).Scan(
+		&st.Total, &st.Pending, &st.Critical, &st.High, &st.Medium, &st.Low, &st.Distinct.Total)
+	if err != nil {
+		return nil, err
+	}
+	// Severity buckets describe matching original reports, not a folder's rating.
+	st.Distinct.Reports = st.Total
+	st.Distinct.Critical, st.Distinct.High = st.Critical, st.High
+	st.Distinct.Medium, st.Distinct.Low = st.Medium, st.Low
+	st.Distinct.Unassessed = st.Total - st.Critical - st.High - st.Medium - st.Low
 	return st, nil
 }
 

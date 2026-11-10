@@ -930,13 +930,13 @@ func (t *Traffic) Page(f PageQuery, page, size int) (rows []ExchangeMeta, total 
 	}
 	if s := strings.TrimSpace(f.Query); s != "" {
 		like := "%" + s + "%"
-		const meta = "host LIKE ? OR url LIKE ? OR url_template LIKE ? OR method LIKE ? OR content_type LIKE ? OR CAST(status AS TEXT) LIKE ?"
+		const meta = "id LIKE ? OR host LIKE ? OR url LIKE ? OR url_template LIKE ? OR method LIKE ? OR content_type LIKE ? OR CAST(status AS TEXT) LIKE ?"
 		// Metadata match OR full-text match: one search box, widest recall. Terms
 		// too short for trigram silently fall back to metadata only.
 		if cond, arg, ok := t.ftsFilter(s); ok {
-			add("(("+meta+") OR "+cond+")", like, like, like, like, like, like, arg)
+			add("(("+meta+") OR "+cond+")", like, like, like, like, like, like, like, arg)
 		} else {
-			add("("+meta+")", like, like, like, like, like, like)
+			add("("+meta+")", like, like, like, like, like, like, like)
 		}
 	}
 	// Body is the dedicated content box: it only searches captured request/response
@@ -2151,10 +2151,10 @@ func (t *Traffic) Tools() []actool.CoreTool {
 
 	get := actool.Build(actool.Spec{
 		Name:        "traffic_get",
-		Description: "Fetch the raw request/response of one captured traffic record by id (truncated when too large). Use together with traffic_search to avoid re-curling.",
+		Description: "Fetch the raw request/response of one captured traffic record by id (truncated when too large). The id is identical to the traffic ID displayed in the traffic UI and the id returned by traffic_search — retain it whole, it is not a row index. If the ID is already known, read it directly without re-searching.",
 		Schema: map[string]any{
 			"type":       "object",
-			"properties": map[string]any{"id": map[string]any{"type": "string", "description": "the id returned by traffic_search"}},
+			"properties": map[string]any{"id": map[string]any{"type": "string", "description": "the full traffic ID returned by traffic_search or displayed in the traffic UI (not a row index)"}},
 			"required":   []any{"id"},
 		},
 		ReadOnly:    ro,

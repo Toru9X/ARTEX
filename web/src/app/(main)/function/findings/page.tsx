@@ -671,12 +671,48 @@ export default function FindingsPage() {
 
   // Whole-table aggregates (stat cards + vuln-class options) — independent of the
   // current page, so they stay exact.
-  usePoll(async (signal) => {
-    const s = await api.findingStats();
-    if (signal.aborted) return; // keep the previous aggregate snapshot
-    setStats(s);
-    setStatsLoaded(true);
-  }, 5000);
+  const statsQuery = React.useMemo(
+    () => ({
+      severity,
+      status,
+      verificationStatus,
+      vulnclass,
+      task,
+      query,
+      sort,
+      ...dateRange,
+      assetScope: view === "asset" ? (assetScope ?? undefined) : undefined,
+    }),
+    [severity, status, verificationStatus, vulnclass, task, query, sort, dateRange, view, assetScope],
+  );
+
+  const statsFingerprint = JSON.stringify(statsQuery);
+
+  const refreshStats = React.useCallback(async () => {
+    try {
+      const s = await api.findingStats(statsQuery);
+      setStats(s);
+      setStatsLoaded(true);
+    } catch {
+      // Retain the previous snapshot during transient refresh failures.
+    }
+  }, [statsQuery]);
+
+  // Counts follow the current filters independently of pagination.
+  usePoll(
+    async (signal) => {
+      try {
+        const s = await api.findingStats(statsQuery);
+        if (signal.aborted) return;
+        setStats(s);
+        setStatsLoaded(true);
+      } catch {
+        // Retain the previous snapshot during transient refresh failures.
+      }
+    },
+    5000,
+    { resetKey: statsFingerprint },
+  );
 
   React.useEffect(() => {
     if (!statsLoaded) return;
@@ -700,12 +736,7 @@ export default function FindingsPage() {
         await api.setFindingStatus(f.finding_id, next);
         toast.success(`Marked as "${statusMeta("finding", next).label}"`);
         // refresh stat cards (pending count) and drop the row if it no longer matches the status filter
-        api
-          .findingStats()
-          .then(setStats)
-          .catch(() => {
-            // The row update remains valid even if the aggregate refresh fails.
-          });
+        void refreshStats();
         if (status !== "all" && next !== status) {
           setFindings((cur) => cur.filter((x) => !isSameFinding(x, f)));
           setTotal((t) => Math.max(0, t - 1));
@@ -717,7 +748,7 @@ export default function FindingsPage() {
         toast.error(`Update failed: ${(e as Error).message}`);
       }
     },
-    [refreshAfterMutation, setFindings, status],
+    [refreshAfterMutation, refreshStats, setFindings, status],
   );
 
   // The inline detailed-report cache is keyed by a globally stable row key. report is a long Markdown
@@ -770,12 +801,7 @@ export default function FindingsPage() {
           ),
         );
         toast.success("Saved");
-        api
-          .findingStats()
-          .then(setStats)
-          .catch(() => {
-            // The edit remains valid even if the aggregate refresh fails.
-          });
+        void refreshStats();
         refreshAfterMutation(f);
       } catch (e) {
         toast.error(`Save failed: ${(e as Error).message}`);
@@ -783,7 +809,7 @@ export default function FindingsPage() {
         setSaving(false);
       }
     },
-    [edit, refreshAfterMutation, setFindings],
+    [edit, refreshAfterMutation, refreshStats, setFindings],
   );
 
   // deleteFinding removes a finding (with a confirmation): on success it drops the row, collapses it and refreshes the stats.
@@ -803,18 +829,13 @@ export default function FindingsPage() {
         const rowKey = findingRowKey(f);
         setExpanded((cur) => (cur === rowKey ? null : cur));
         toast.success("Finding deleted");
-        api
-          .findingStats()
-          .then(setStats)
-          .catch(() => {
-            // The deletion remains valid even if the aggregate refresh fails.
-          });
+        void refreshStats();
         refreshAfterMutation(f, true);
       } catch (e) {
         toast.error(`Delete failed: ${(e as Error).message}`);
       }
     },
-    [refreshAfterMutation, setFindings],
+    [refreshAfterMutation, refreshStats, setFindings],
   );
 
   const openDeepen = React.useCallback((f: Finding) => {

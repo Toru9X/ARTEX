@@ -7,6 +7,7 @@ import {
   ArrowUpNarrowWideIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  CopyIcon,
   EraserIcon,
   FilterXIcon,
   ListChecksIcon,
@@ -45,7 +46,7 @@ import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import { useStoredSortPreference } from "@/lib/sort-preference";
 import type { TrafficDetail, TrafficExchange, TrafficHost, TrafficResp } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, copyText } from "@/lib/utils";
 
 function fmtTime(ts: string) {
   return new Date(ts).toLocaleString("zh-CN", {
@@ -77,6 +78,29 @@ function statusTone(status: number) {
 
 function MethodBadge({ method }: { method: string }) {
   return <Badge className="shrink-0 font-mono">{method}</Badge>;
+}
+
+function TrafficID({ id }: { id: string }) {
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="h-7 gap-1 px-1 font-mono text-xs"
+      title="Copy Traffic ID, usable for search or handing off to the Report Agent"
+      aria-label={`Copy Traffic ID ${id}`}
+      onClick={async (event) => {
+        event.stopPropagation();
+        if (await copyText(id)) {
+          toast.success("Traffic ID copied");
+        } else {
+          toast.error("Failed to copy traffic ID, please select manually");
+        }
+      }}
+    >
+      {id}
+      <CopyIcon className="size-3 shrink-0" />
+    </Button>
+  );
 }
 
 // Older captures may predate Host persistence because net/http keeps Host
@@ -488,7 +512,7 @@ export default function TrafficPage() {
         <div className="relative max-w-sm flex-1">
           <SearchIcon className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="Search everything (URL / method / type / status…)"
+            placeholder="Search everything (ID / URL / method / type / status…)"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             className="h-8 pl-8"
@@ -642,6 +666,7 @@ export default function TrafficPage() {
                       }
                     />
                   </TableHead>
+                  <TableHead className="w-44">Traffic ID</TableHead>
                   <SortableHead
                     field="ts"
                     label="Time"
@@ -695,6 +720,9 @@ export default function TrafficPage() {
                         }
                       />
                     </TableCell>
+                    <TableCell>
+                      <TrafficID id={e.id} />
+                    </TableCell>
                     <TableCell className="text-xs text-muted-foreground tabular-nums">{fmtTime(e.ts)}</TableCell>
                     <TableCell className="font-mono text-xs">{e.host}</TableCell>
                     <TableCell>
@@ -714,7 +742,7 @@ export default function TrafficPage() {
                 ))}
                 {exchanges.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={8} className="py-12 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={9} className="py-12 text-center text-sm text-muted-foreground">
                       {traffic === null ? "Loading…" : "No matching traffic."}
                     </TableCell>
                   </TableRow>
@@ -746,6 +774,10 @@ export default function TrafficPage() {
                 </div>
                 <SheetTitle className="break-all font-mono">{selected.host}</SheetTitle>
                 <SheetDescription className="break-all font-mono">{selected.url}</SheetDescription>
+                <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                  Traffic ID:
+                  <TrafficID id={selected.id} />
+                </div>
               </SheetHeader>
               <Tabs defaultValue="request" className="min-h-0 flex-1 gap-0">
                 <TabsList className="mx-5 mt-4 grid w-auto grid-cols-2">
