@@ -29,20 +29,23 @@ type DBFinding struct {
 	ReportEvidenceVersion int64
 	TrafficBindings       []FindingTrafficBinding // populated only for export
 
-	ID              int64
-	TaskID          *int64
-	NodeID          *int64
-	VulnClass       string
-	Name            string // vulnerability name (readable title); when empty the frontend falls back to VulnClass
-	Severity        string
-	Summary         string
-	Evidence        string
-	Worker          string
-	AssetIDs        []int64
-	Status          string
-	Report          string // detailed report (Markdown); only populated by GetFinding, not by list queries
-	CreatedAt       time.Time
-	TaskDescription string // populated via LEFT JOIN on tasks
+	ID                 int64
+	TaskID             *int64
+	NodeID             *int64
+	VulnClass          string
+	Name               string // vulnerability name (readable title); when empty the frontend falls back to VulnClass
+	Severity           string
+	Summary            string
+	Evidence           string
+	Worker             string
+	AssetIDs           []int64
+	Status             string
+	PoELevel           int    // proof-of-exploitation level 0-4 (S1); 0 = none declared
+	VerificationStatus string // verified / unverified / blocked / not_assessed / false_positive
+	VerificationNote   string // why the status was reached; empty when verified
+	Report             string // detailed report (Markdown); only populated by GetFinding, not by list queries
+	CreatedAt          time.Time
+	TaskDescription    string // populated via LEFT JOIN on tasks
 }
 
 // Finding triage states (findings.status).
@@ -114,6 +117,7 @@ func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary
 const findingSelectCols = `f.id, f.task_id, f.node_id, f.vulnclass, COALESCE(f.name, ''), f.severity, f.summary,
 	       f.evidence, f.worker, f.asset_ids, COALESCE(f.status, 'pending'), f.created_at,
 	       COALESCE(t.description, '') AS task_description, f.evidence_version, f.report_evidence_version,
+	       f.poe_level, COALESCE(f.verification_status, 'unverified'), COALESCE(f.verification_note, ''),
  (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id)`
 
 // scanFindings materializes rows selected via findingSelectCols.
@@ -127,7 +131,7 @@ func scanFindings(rows interface {
 		f := &DBFinding{}
 		var aidsJSON string
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
-			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount); err != nil {
+			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.PoELevel, &f.VerificationStatus, &f.VerificationNote, &f.TrafficCount); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
@@ -159,15 +163,16 @@ func (d *DB) ListFindings(limit int) ([]*DBFinding, error) {
 // filter on that column". Sort is "severity" (severity desc, then newest) or
 // anything else (newest first).
 type FindingFilter struct {
-	Severity      string // high | medium | low
-	Status        string // pending | false_positive | ignored | resolved
-	VulnClass     string
-	TaskID        string // task id (in string form; empty/invalid = do not filter by task)
-	Query         string // fuzzy search keyword over name/class/summary/evidence/report body
-	Sort          string // "severity" | "time"
-	TimeDirection string // "asc" | "desc"; applies to time, not the severity ranking
-	From          string // RFC3339 timestamp, inclusive
-	To            string // RFC3339 timestamp, inclusive
+	Severity           string // high | medium | low
+	Status             string // pending | false_positive | ignored | resolved
+	VerificationStatus string // verified | unverified | blocked | not_assessed | false_positive
+	VulnClass          string
+	TaskID             string // task id (in string form; empty/invalid = do not filter by task)
+	Query              string // fuzzy search keyword over name/class/summary/evidence/report body
+	Sort               string // "severity" | "time"
+	TimeDirection      string // "asc" | "desc"; applies to time, not the severity ranking
+	From               string // RFC3339 timestamp, inclusive
+	To                 string // RFC3339 timestamp, inclusive
 	// AssetScope is a node key of the asset tree (a:<id> / c:<id> / r:<domain> /
 	// __none__); selecting a node means selecting its whole subtree.
 	// Empty = do not filter by asset.
@@ -208,6 +213,7 @@ func (f FindingFilter) where() (string, []any) {
 	}
 	add("severity", f.Severity)
 	add("status", f.Status)
+	add("verification_status", f.VerificationStatus)
 	add("vulnclass", f.VulnClass)
 	// An unparsable bound is ignored rather than rejected: the filter is a
 	// convenience, and a bad value must not empty an otherwise valid page.
@@ -553,7 +559,7 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 		var aidsJSON string
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report); err != nil {
+			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.PoELevel, &f.VerificationStatus, &f.VerificationNote, &f.TrafficCount, &f.Report); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
@@ -684,7 +690,8 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		WHERE f.id = $1`, id).Scan(
 		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report, &reportConv)
+		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.PoELevel,
+		&f.VerificationStatus, &f.VerificationNote, &f.TrafficCount, &f.Report, &reportConv)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

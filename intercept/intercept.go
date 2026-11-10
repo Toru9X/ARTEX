@@ -527,17 +527,26 @@ func (i *Interceptor) Judge(ctx context.Context, tool string, arguments json.Raw
 	out.ProfileID = cfg.ProfileID
 	configJSON, _ := json.Marshal(cfg)
 	out.ConfigDigest = digestInput(configJSON)
-	if out.Message == "" {
-		out.Message = "[model] " + judgeActionLabel(out.Action)
-	} else if !strings.HasPrefix(out.Message, "[model]") {
-		out.Message = "[model] " + out.Message
-	}
+	out.Message = JudgeReason(out.Action, out.Message)
 	if out.Action == "ask" {
 		out.TimeoutEnabled = true
 		out.TimeoutSeconds = cfg.AskTimeoutSeconds
 		out.TimeoutAction = cfg.AskTimeoutAction
 	}
 	return out, true
+}
+
+// JudgeReason is the reason stored for a judge verdict: the model's message, or
+// a label for the action when it gave none, carrying db.ModelReasonPrefix so
+// the db readers record decision_source='model'.
+func JudgeReason(action, message string) string {
+	if message == "" {
+		return db.ModelReasonPrefix + " " + judgeActionLabel(action)
+	}
+	if !strings.HasPrefix(message, db.ModelReasonPrefix) {
+		return db.ModelReasonPrefix + " " + message
+	}
+	return message
 }
 
 func judgeActionLabel(action string) string {
@@ -679,7 +688,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 		case allowed := <-ch:
 			return allowed
 		case <-ctx.Done():
-			_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "work cancelled")
+			_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "work cancelled", "system")
 			_ = i.db.CompleteIntercept(pendingID, audit.RunID, audit.ToolUseID, "not_executed", "work cancelled before execution", false)
 			return false
 		}
@@ -700,7 +709,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 		if allowed {
 			action = "allow"
 		}
-		resolved, err := i.db.ResolveIntercept(pendingID, "timeout", action, "approval timed out, applying timeout policy")
+		resolved, err := i.db.ResolveIntercept(pendingID, "timeout", action, "approval timed out, applying timeout policy", "system")
 		if err != nil {
 			return false
 		}
@@ -710,7 +719,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 		}
 		return allowed
 	case <-ctx.Done():
-		_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "work cancelled")
+		_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "work cancelled", "system")
 		_ = i.db.CompleteIntercept(pendingID, audit.RunID, audit.ToolUseID, "not_executed", "work cancelled before execution", false)
 		return false
 	}
@@ -728,7 +737,7 @@ func (i *Interceptor) Decide(pendingID int64, allowed bool) error {
 	if allowed {
 		action, reason = "allow", "user approved execution"
 	}
-	resolved, err := i.db.ResolveIntercept(pendingID, status, action, reason)
+	resolved, err := i.db.ResolveIntercept(pendingID, status, action, reason, "human")
 	if err != nil {
 		return err
 	}

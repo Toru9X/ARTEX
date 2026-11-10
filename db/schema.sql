@@ -396,6 +396,8 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     -- Custom session header: when non-empty, every request carries an HTTP header of this name whose value is the current session id
     -- (chat session/worker intent). For gateways that do prompt caching/sticky routing by a session-id header. ''=do not send.
     session_header_key TEXT NOT NULL DEFAULT '',
+    -- Custom User-Agent: when non-empty, every outbound LLM request overrides the User-Agent header with this value. ''=do not override (keep the default UA).
+    user_agent       TEXT NOT NULL DEFAULT '',
     -- Retry overrides: attempts 0=use global default / -1=disable / >0=use this value; interval 0=use default exponential backoff / >0=fixed milliseconds.
     -- The three groups correspond to connect retry, empty-response retry, and same-provider safe-window retry; see the ALTER comment below.
     retry_connect_attempts    INTEGER NOT NULL DEFAULT 0,
@@ -436,6 +438,8 @@ ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_max_tokens_check
     CHECK (max_tokens >= 0);
 -- Custom session header name; backfills old databases. Default '' = do not send; old configs behave unchanged.
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS session_header_key TEXT NOT NULL DEFAULT '';
+-- Custom User-Agent; backfills old databases. Default '' = do not override (keep the default UA); old configs behave unchanged.
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS user_agent TEXT NOT NULL DEFAULT '';
 
 -- Per-profile retry overrides (see the LLM retry design doc). Each of the three groups is a pair of
 -- "attempts + fixed interval" with unified semantics: attempts 0=use the global default, -1=disable this layer's
@@ -1084,7 +1088,7 @@ CREATE TABLE IF NOT EXISTS intercept_pending (
     tool_input      JSONB NOT NULL DEFAULT '{}',
     status          TEXT NOT NULL DEFAULT 'pending'
                         CHECK (status IN ('pending', 'allowed', 'denied', 'timeout')),
-    -- Decision reason: the rule message when a rule hits; the model's short reason (with the [Model] prefix) for an LLM fallback decision.
+    -- Decision reason: the rule message when a rule hits; the model's short reason (with the [model] prefix) for an LLM fallback decision.
     reason          TEXT NOT NULL DEFAULT '',
     decided_at      TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1098,6 +1102,16 @@ ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS audit JSONB;
 ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT '';
 UPDATE intercept_pending SET decision_source=CASE WHEN rule_id IS NOT NULL THEN 'rule'
  WHEN reason LIKE '[Model]%' THEN 'model' ELSE 'unknown' END WHERE decision_source='';
+-- Judge decisions were stored as 'unknown' because the readers expected a capitalized
+-- prefix while the judge wrote '[model]' (and '[模型]' before e233c02). Idempotent:
+-- once corrected no row matches the WHERE clause again.
+UPDATE intercept_pending SET decision_source='model'
+ WHERE decision_source='unknown' AND rule_id IS NULL
+   AND (reason LIKE '[model]%' OR reason LIKE '[模型]%');
+-- Actor that settled the request: '' (pending, or decided before this column
+-- existed) | human | rule | model | system. No backfill: readers fall back to
+-- decision_source for legacy rows instead of rewriting history.
+ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS decided_by TEXT NOT NULL DEFAULT '';
 
 -- =====================================================================
 -- L. Finding persistence
@@ -1167,6 +1181,12 @@ CREATE TRIGGER trg_conversation_retest_delete BEFORE DELETE ON conversations
 
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS evidence_version BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_evidence_version BIGINT NOT NULL DEFAULT 0;
+-- Machine-checked proof state (S1). Separate from status (human disposition). Existing rows stay
+-- unverified / POE 0: history is never auto-verified. Values validated server-side, no CHECK.
+-- verification_status: verified / unverified / blocked / not_assessed / false_positive.
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS poe_level SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_status TEXT NOT NULL DEFAULT 'unverified';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_note TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS traffic_evidence_snapshots (
     id TEXT PRIMARY KEY,

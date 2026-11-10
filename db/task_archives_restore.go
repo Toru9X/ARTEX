@@ -692,13 +692,18 @@ func restoreInterceptRows(tx *sql.Tx, raw json.RawMessage) error {
 			source = "unknown"
 			if row["rule_id"] != nil {
 				source = "rule"
-			} else if reason, _ := row["reason"].(string); strings.HasPrefix(reason, "[Model]") {
+			} else if reason, _ := row["reason"].(string); isModelReason(reason) {
 				source = "model"
 			}
 			row["decision_source"] = source
 		}
+		// Archives predating decided_by lack this NOT NULL column too.
+		if row["decided_by"] == nil {
+			row["decided_by"] = ""
+		}
 		if status, _ := row["status"].(string); status == "pending" {
 			row["status"] = "timeout"
+			row["decided_by"] = "system"
 			row["reason"] = "approval timed out while the task was archived"
 			row["decided_at"] = time.Now().UTC()
 			if audit, ok := row["audit"].(map[string]any); ok {

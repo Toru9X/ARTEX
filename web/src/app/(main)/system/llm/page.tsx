@@ -346,6 +346,7 @@ function ProfileSheet({
   const [maxTokens, setMaxTokens] = React.useState("0"); // per-reply output cap; 0 = not sent
   const [maxTokensField, setMaxTokensField] = React.useState(NONE); // which field name carries the cap; NONE = max_tokens
   const [sessionHeaderKey, setSessionHeaderKey] = React.useState(""); // custom session header name; empty = not sent
+  const [userAgent, setUserAgent] = React.useState(""); // custom User-Agent; empty = keep the default UA
   const [retry, setRetry] = React.useState<LLMRetryOverride>(ZERO_OVERRIDE); // retry override for this profile; all 0 = follow the global
   const [testing, setTesting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
@@ -377,6 +378,7 @@ function ProfileSheet({
     setMaxTokens(String(profile?.max_tokens ?? 0));
     setMaxTokensField(fromStore(profile?.max_tokens_field));
     setSessionHeaderKey(profile?.session_header_key ?? "");
+    setUserAgent(profile?.user_agent ?? "");
     setRetry(profile?.retry ?? ZERO_OVERRIDE);
     setApiKey("");
     setKeyHint(profile?.api_key_hint ?? "");
@@ -423,6 +425,7 @@ function ProfileSheet({
         profileId,
         streaming,
         sessionHeaderKey.trim(),
+        userAgent.trim(),
       );
       // Show the reply too: only when the model demonstrably spoke is this the same as working inside a session.
       if (r.ok)
@@ -466,6 +469,7 @@ function ProfileSheet({
         // and the backend re-applies the same normalization; this just keeps the UI from sending contradictory values.
         max_tokens_field: format === "openai" ? toStore(maxTokensField) : "",
         session_header_key: sessionHeaderKey.trim(),
+        user_agent: userAgent.trim(),
         retry,
       });
       if (isNew) toast.success(`Created: ${name.trim()} (use "Set as active" on its card to enable it)`);
@@ -627,6 +631,21 @@ function ProfileSheet({
               as the <b>current session's session id</b> (chat sessions like conv-12, workers like exp3-worker-i87).
               Meant for gateways that do prompt caching / sticky routing on a session-id header; stable across turns of
               one session, distinct across sessions. Leave empty to not send it.
+            </p>
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="p-user-agent">Custom User-Agent (optional)</Label>
+            <Input
+              id="p-user-agent"
+              className="font-mono"
+              placeholder="e.g. my-app/1.0 (empty = default UA)"
+              value={userAgent}
+              onChange={(e) => setUserAgent(e.target.value)}
+            />
+            <p className="text-muted-foreground text-xs">
+              Overrides the <b>User-Agent</b> header on every outbound LLM request. Useful for gateways that route or allow-list by
+              User-Agent. Leave empty to keep the default User-Agent unchanged.
             </p>
           </div>
 

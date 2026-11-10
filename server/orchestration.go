@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -463,37 +465,50 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			"finding_id":       map[string]any{"type": "integer", "description": "target vulnerability id (the id returned by report_finding)"},
 			"report":           strParam("full report text, Markdown format"),
 			"evidence_version": map[string]any{"type": "integer", "description": "evidence version returned by get_finding_traffic; prevents the report from overwriting newer evidence changes"},
+			"poe_level":        map[string]any{"type": "integer", "description": "proof-of-exploitation level 0-4: 1 error/timing/response variation, 2 structural manipulation, 3 actual data extracted, 4 critical impact. L3 is the minimum for verified. Omit or 0 when not proven."},
+			"evidence_quotes":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "exact lines copied from a bound proof/verification response body (get_finding_traffic). Never from memory; the server checks each one verbatim after whitespace normalization."},
 		}, "finding_id", "report"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				EvidenceVersion *int64          `json:"evidence_version"`
 				FindingID       json.RawMessage `json:"finding_id"`
 				Report          string          `json:"report"`
+				PoELevel        *int            `json:"poe_level"`
+				EvidenceQuotes  []string        `json:"evidence_quotes"`
 			}
 			_ = json.Unmarshal(in, &a)
 			nodeID := parseProfileID(a.FindingID) // reuses the "number or numeric string" parser
 			if nodeID <= 0 {
 				return actool.Errorf("invalid finding_id"), nil
 			}
-			// A historical consolidation run may read the originals but never
-			// rewrite them, so the scope check comes before the write.
-			fid, err := s.m.pg.FindingIDByNodeID(nodeID)
+			poe := 0
+			if a.PoELevel != nil {
+				poe = *a.PoELevel
+			}
+			if poe < 0 || poe > 4 {
+				return actool.Errorf(fmt.Sprintf("invalid poe_level %d (want 0-4)", poe)), nil
+			}
+			notFound := actool.Errorf(fmt.Sprintf("no vulnerability record found for finding_id=%d (register it with report_finding first)", nodeID))
+			findingID, err := s.m.pg.FindingIDByNodeID(nodeID)
+			if errors.Is(err, sql.ErrNoRows) {
+				return notFound, nil
+			}
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			if fid > 0 {
-				if err := s.checkCaseReviewScope(ctx, "update_finding_report", findingCaseRequest{FindingID: json.RawMessage(i64s(fid))}); err != nil {
+			if findingID > 0 {
+				if err := s.checkCaseReviewScope(ctx, "update_finding_report", findingCaseRequest{FindingID: json.RawMessage(i64s(findingID))}); err != nil {
 					return actool.Errorf(err.Error()), nil
 				}
 				// A report can reference screenshots written under a session directory;
 				// copy them into the task workspace so the links survive the session.
-				if f, err := s.m.pg.GetFinding(fid); err == nil && f != nil && f.TaskID != nil {
+				if f, err := s.m.pg.GetFinding(findingID); err == nil && f != nil && f.TaskID != nil {
 					if err := s.archiveFindingScreenshots(*f.TaskID, a.Report); err != nil {
 						return actool.Errorf("could not archive the report screenshots: " + err.Error()), nil
 					}
 				}
 				if conversationID := intercept.ConvIDFromContext(ctx); conversationID > 0 {
-					if err := s.m.pg.SetFindingReportConversationID(fid, conversationID); err != nil {
+					if err := s.m.pg.SetFindingReportConversationID(findingID, conversationID); err != nil {
 						return actool.Errorf("could not link the report conversation: " + err.Error()), nil
 					}
 				}
@@ -503,9 +518,21 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 				return actool.Errorf(err.Error()), nil
 			}
 			if n == 0 {
-				return actool.Errorf(fmt.Sprintf("no vulnerability record found for finding_id=%d (register it with report_finding first)", nodeID)), nil
+				return notFound, nil
 			}
-			return actool.Text(fmt.Sprintf("finding %d report updated (%d chars)", nodeID, len(a.Report))), nil
+			// The report is saved above; verification only decides the status. A
+			// downgrade is recorded and reported, never used to drop the report.
+			status, note := s.assessFindingVerification(ctx, findingID, poe, a.EvidenceQuotes)
+			if err := s.m.pg.SetFindingVerification(findingID, status, poe, note); err != nil {
+				return actool.Errorf("report saved, but verification not recorded: " + err.Error()), nil
+			}
+			msg := fmt.Sprintf("finding %d report updated (%d chars)\nverification: %s", nodeID, len(a.Report), status)
+			if status == db.VerificationVerified {
+				msg += fmt.Sprintf(" (POE L%d)", poe)
+			} else {
+				msg += " - " + note + "\nwarning: the report is saved but the finding is not verified. To reach verified, declare poe_level 3 or 4 and pass exact quotes copied from a bound proof/verification response body."
+			}
+			return actool.Text(msg), nil
 		})
 }
 
@@ -571,6 +598,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedFindingTrafficTools()       // adds optional evidence params and read-only evidence tools, preserving user config
 	s.seedFindingSeverityEnum()       // declares report_finding's severity vocabulary on rows seeded before it was an enum (one-time)
 	s.seedFindingWorkflowTools()
+	s.seedFindingVerificationSchema() // S1: poe_level / evidence_quotes on update_finding_report, added once per DB
 	if s.m.pg.GetBool(settingBrowserScreenshot, false) {
 		// Re-apply the opt-in after startup seeding, so an existing database gets
 		// both the reporter's visibility and the repaired Playwright arguments.

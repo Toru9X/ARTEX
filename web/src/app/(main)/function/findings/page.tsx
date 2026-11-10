@@ -54,6 +54,7 @@ import type {
   FindingStats,
   FindingStatus,
   Severity,
+  VerificationStatus,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -68,6 +69,8 @@ import {
   isSameFinding,
   SEVERITIES,
   UNASSIGNED_TASK,
+  VERIFICATION_META,
+  VERIFICATION_STATUSES,
 } from "./_components/findings-table";
 
 const FINDING_LIST_PREFERENCE_KEY = "artex_finding_list_preferences";
@@ -139,6 +142,7 @@ export default function FindingsPage() {
   const [view, setView] = React.useState<FindingView>("cases");
   const [severity, setSeverity] = React.useState<"all" | Severity>("all");
   const [status, setStatus] = React.useState<"all" | FindingStatus>("all");
+  const [verificationStatus, setVerificationStatus] = React.useState<"all" | VerificationStatus>("all");
   const [vulnclass, setVulnclass] = React.useState<string>("all");
   const [task, setTask] = React.useState<string>("all");
   const [sort, setSort] = React.useState<"severity" | "time">("severity");
@@ -173,6 +177,7 @@ export default function FindingsPage() {
   const filterFingerprint = JSON.stringify([
     severity,
     status,
+    verificationStatus,
     vulnclass,
     task,
     sort,
@@ -217,6 +222,7 @@ export default function FindingsPage() {
           view?: unknown;
           severity?: unknown;
           status?: unknown;
+          verificationStatus?: unknown;
           vulnclass?: unknown;
           task?: unknown;
           sort?: unknown;
@@ -227,6 +233,12 @@ export default function FindingsPage() {
         }
         if (parsed.status === "all" || FINDING_STATUSES.includes(parsed.status as FindingStatus)) {
           setStatus(parsed.status as "all" | FindingStatus);
+        }
+        if (
+          parsed.verificationStatus === "all" ||
+          VERIFICATION_STATUSES.includes(parsed.verificationStatus as VerificationStatus)
+        ) {
+          setVerificationStatus(parsed.verificationStatus as "all" | VerificationStatus);
         }
         if (typeof parsed.vulnclass === "string" && parsed.vulnclass) setVulnclass(parsed.vulnclass);
         if (typeof parsed.task === "string" && parsed.task) setTask(parsed.task);
@@ -242,9 +254,9 @@ export default function FindingsPage() {
     if (!preferencesHydrated) return;
     setLocalStorageValue(
       FINDING_LIST_PREFERENCE_KEY,
-      JSON.stringify({ view, severity, status, vulnclass, task, sort }),
+      JSON.stringify({ view, severity, status, verificationStatus, vulnclass, task, sort }),
     );
-  }, [preferencesHydrated, severity, sort, status, task, view, vulnclass]);
+  }, [preferencesHydrated, severity, sort, status, task, verificationStatus, view, vulnclass]);
 
   React.useEffect(() => {
     const timer = window.setTimeout(() => setQuery(search.trim()), 300);
@@ -318,6 +330,7 @@ export default function FindingsPage() {
         filters: {
           severity,
           status,
+          verificationStatus,
           vulnclass,
           task,
           query,
@@ -366,6 +379,7 @@ export default function FindingsPage() {
           pageSize: flatPageSize,
           severity,
           status,
+          verificationStatus,
           vulnclass,
           task,
           query,
@@ -396,6 +410,7 @@ export default function FindingsPage() {
     flatPageSize,
     severity,
     status,
+    verificationStatus,
     vulnclass,
     task,
     query,
@@ -410,7 +425,16 @@ export default function FindingsPage() {
     const request = ++assetTreeRequest.current;
     setAssetTree((current) => ({ ...current, loading: true }));
     try {
-      const result = await api.findingAssetTree({ severity, status, vulnclass, task, query, sort, ...dateRange });
+      const result = await api.findingAssetTree({
+        severity,
+        status,
+        verificationStatus,
+        vulnclass,
+        task,
+        query,
+        sort,
+        ...dateRange,
+      });
       if (request !== assetTreeRequest.current || activeFilterFingerprint.current !== requestFilter) return;
       setAssetTree({
         nodes: result.nodes ?? [],
@@ -425,7 +449,7 @@ export default function FindingsPage() {
       setAssetTree((current) => ({ ...current, loading: false }));
       toast.error(`Could not load the asset tree: ${(e as Error).message}`);
     }
-  }, [dateRange, filterFingerprint, severity, status, vulnclass, task, query, sort]);
+  }, [dateRange, filterFingerprint, severity, status, verificationStatus, vulnclass, task, query, sort]);
 
   const refreshGroups = React.useCallback(async () => {
     const requestFilter = filterFingerprint;
@@ -437,6 +461,7 @@ export default function FindingsPage() {
         pageSize,
         severity,
         status,
+        verificationStatus,
         vulnclass,
         task,
         query,
@@ -450,7 +475,7 @@ export default function FindingsPage() {
     } catch {
       // Polling keeps the last successful snapshot visible.
     }
-  }, [dateRange, filterFingerprint, page, pageSize, severity, status, vulnclass, task, query, sort]);
+  }, [dateRange, filterFingerprint, page, pageSize, severity, status, verificationStatus, vulnclass, task, query, sort]);
 
   const loadGroup = React.useCallback(
     async (key: string, groupPage: number, groupPageSize: number) => {
@@ -477,6 +502,7 @@ export default function FindingsPage() {
             pageSize: groupPageSize,
             severity,
             status,
+            verificationStatus,
             vulnclass,
             task: key,
             query,
@@ -516,7 +542,7 @@ export default function FindingsPage() {
         }));
       }
     },
-    [dateRange, filterFingerprint, severity, status, vulnclass, query, sort],
+    [dateRange, filterFingerprint, severity, status, verificationStatus, vulnclass, query, sort],
   );
 
   React.useEffect(() => {
@@ -963,6 +989,23 @@ export default function FindingsPage() {
               {FINDING_STATUSES.map((st) => (
                 <SelectItem key={st} value={st}>
                   {statusMeta("finding", st).label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select
+            value={verificationStatus}
+            onValueChange={(v) => setVerificationStatus(v as "all" | VerificationStatus)}
+          >
+            <SelectTrigger size="sm" className="w-48">
+              <SelectValue placeholder="Verification" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All verification states</SelectItem>
+              {VERIFICATION_STATUSES.map((st) => (
+                <SelectItem key={st} value={st}>
+                  {VERIFICATION_META[st].label}
                 </SelectItem>
               ))}
             </SelectContent>

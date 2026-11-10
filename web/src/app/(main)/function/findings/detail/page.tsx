@@ -27,6 +27,7 @@ import { api } from "@/lib/api";
 import { statusMeta } from "@/lib/status";
 import type { Finding, FindingStatus, Severity } from "@/lib/types";
 
+import { VerificationBadge } from "../_components/findings-table";
 import { FindingLineageView } from "./lineage";
 
 const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
@@ -190,6 +191,7 @@ function FindingDetailInner() {
             <Separator orientation="vertical" className="mx-1 h-4" />
             <StatusBadge domain="severity" value={finding.severity} dot />
             <StatusBadge domain="finding" value={finding.status} dot />
+            <VerificationBadge finding={finding} />
             <Button
               variant="outline"
               size="sm"
@@ -367,6 +369,20 @@ function FindingDetailInner() {
                         </Select>
                       )}
                     </FieldRow>
+
+                    {/* Verification */}
+                    {finding.verification_status ? (
+                      <FieldRow label="Verification">
+                        <div className="flex flex-col items-end gap-1">
+                          <VerificationBadge finding={finding} />
+                          {finding.verification_note ? (
+                            <span className="max-w-[16rem] text-right text-muted-foreground text-xs">
+                              {finding.verification_note}
+                            </span>
+                          ) : null}
+                        </div>
+                      </FieldRow>
+                    ) : null}
 
                     {/* Vulnerability type */}
                     <FieldRow label="Vulnerability type">
