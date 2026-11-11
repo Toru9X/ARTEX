@@ -814,6 +814,7 @@ func (s *Server) syncTaskLLMState(pt *db.Task) {
 	s.m.mu.Lock()
 	if task := s.m.tasks[id]; task != nil {
 		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMChainRevision, pt.LLMFailoverState, pt.LLMFailoverReason)
+		task.LLMRotate = pt.LLMRotate
 	}
 	s.m.mu.Unlock()
 }

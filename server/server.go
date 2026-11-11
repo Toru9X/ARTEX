@@ -1880,6 +1880,7 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		LLMProfileIDs      []int64 `json:"llm_profile_ids"`
 		ActiveLLMProfileID *int64  `json:"active_llm_profile_id"`
+		LLMRotate          *bool   `json:"llm_rotate"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
@@ -1897,6 +1898,12 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if req.LLMRotate != nil {
+		t.LLMRotate = *req.LLMRotate
+		if _, err := s.m.pg.Exec(`UPDATE tasks SET llm_rotate = $1 WHERE id = $2`, *req.LLMRotate, t.ID); err != nil {
+			log.Printf("[task %s] update llm_rotate failed: %v", t.ID, err)
+		}
 	}
 	// Profile edits affect only subsequent LLM calls. Existing in-flight calls
 	// retain their provider. Concurrency reconciliation treats ActiveLLMCalls as a

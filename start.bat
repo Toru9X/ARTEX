@@ -15,7 +15,10 @@ rem   other  crash             -> rerun after backoff (1->2->4... up to 60 secon
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "BIN=artex.exe"
+rem Absolute path: a bare "artex.exe" is resolved against PATH, and Windows can drop the
+rem current directory from that lookup (NoDefaultCurrentDirectoryInExePath=1), which
+rem turns every launch into exit code 9009 and an endless restart loop.
+set "BIN=%~dp0artex.exe"
 if not exist "%BIN%" (
 	echo [artex] executable %BIN% not found 1>&2
 	exit /b 1

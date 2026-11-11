@@ -1348,6 +1348,7 @@ func (m *Manager) ReplaceTaskLLMProfiles(id string, profileIDs []int64, activePr
 	m.mu.Lock()
 	if task := m.tasks[id]; task != nil {
 		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMChainRevision, pt.LLMFailoverState, pt.LLMFailoverReason)
+		task.LLMRotate = pt.LLMRotate
 	}
 	m.mu.Unlock()
 	// Terminal tasks do not reopen budget-blocked intents: no worker is running for

@@ -75,3 +75,15 @@ posture-runs/
 
 # benchmark runner output (one dir per run)
 benchmark-results/
+
+# local launcher: holds the LLM API key, never committed
+/start-local.bat
+
+# agent instructions
+GEMINI.md
+artex-run.log
+
+# credential dump - service account pentest
+service-account-sa-trungnd66-test.md
+*_ed25519_private.pem
+*~
