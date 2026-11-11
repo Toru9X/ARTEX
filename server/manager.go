@@ -92,9 +92,14 @@ type Task struct {
 	DeadlineAt           int64                  `json:"deadline_at,omitempty"`
 	Store                *pgdb.ExplorationStore `json:"-"`
 	Guard                *guard.Guard           `json:"-"`
+	TargetGuard          *guard.Guard           `json:"-"` // planner and main-agent hooks: target gate only
 	notify               chan struct{}
 	lifecycleMu          sync.RWMutex
 	llmMu                sync.RWMutex
+	// targetGate is the task's opt-in to the approval gate for asset targets.
+	// Atomic: it is switched through the API while tool calls read it.
+	targetGate  atomic.Bool
+	interceptor *intercept.Interceptor // owner of the target gate, handed to the scope
 
 	// pendingTriggers accumulates the concrete changes (worker done / finding) that
 	// fired planning rounds since the last one consumed them. The debounce coalesces
@@ -486,6 +491,8 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		log.Printf("[llmusage] create table: %v", err)
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
+	// Behind the global egress proxy a target approval is name-only.
+	m.interceptor.SetUpstreamProxyCheck(func() bool { return m.GlobalProxy() != "" })
 	// A stable, credential-free local address agents can be handed once. Each
 	// request resolves the current upstream, so switching the active pool entry
 	// does not have to rebuild agents or MCP servers.
@@ -1110,7 +1117,7 @@ func unixNanoOrZero(t *time.Time) int64 {
 }
 
 func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor) *Task {
-	return &Task{
+	t := &Task{
 		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID,
 		Name:       pt.Name,
 		CategoryID: cloneInt64Ptr(pt.CategoryID), CategoryName: pt.CategoryName,
@@ -1128,8 +1135,19 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		PlanQuietMode:   pt.PlanQuietMode,
 		CoverageEnabled: pt.CoverageEnabled,
 		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
-		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
+		Store: store, Guard: guard.NewWithInterceptor(ic), TargetGuard: guard.NewTargetOnly(ic), notify: make(chan struct{}, 1),
+		interceptor: ic,
 	}
+	t.targetGate.Store(pt.TargetGate)
+	return t
+}
+
+// targetScope is the approval scope of this task's tool calls for the target
+// gate. wait bounds how long a gated call may wait for a human decision.
+// Enabled reads the task's opt-in flag on every call, so a switch through the
+// API takes effect on the next tool call.
+func (t *Task) targetScope(wait time.Duration) intercept.TargetScope {
+	return intercept.TargetScope{TaskID: t.ID, Enabled: t.targetGate.Load, WaitBound: wait, Interceptor: t.interceptor}
 }
 
 // UpdateTaskMetadata changes list-only task metadata without interrupting any
@@ -1159,6 +1177,7 @@ func (m *Manager) UpdateTaskMetadata(taskID string, patch pgdb.TaskPatch) (*Task
 	// Live switch (#86): runRound reads the flag per round, so the next
 	// planning round (edge or heartbeat) already respects the new value.
 	task.PlanQuietMode = updated.PlanQuietMode
+	task.targetGate.Store(updated.TargetGate)
 	return task, nil
 }
 

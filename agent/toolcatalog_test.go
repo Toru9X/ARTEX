@@ -120,7 +120,6 @@ func TestAssetMapperSeedsReadOnlyAndKeepsPentestCredentials(t *testing.T) {
 		}
 	}
 }
-
 // TestDecorateToolInjectsDefaults verifies a schema "default" fills a missing param
 // before the underlying handler runs, and an explicitly-provided value is kept.
 func TestDecorateToolInjectsDefaults(t *testing.T) {

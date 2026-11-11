@@ -121,50 +121,88 @@ func feishuSeverityTemplate(severity string) string {
 	}
 }
 
-// feishuMaxCardBytes is a conservative cap on card content. Feishu enforces a
-// size limit on cards and rejects the whole message when exceeded; pick a value
-// clearly below the official limit to also cover JSON wrapping overhead.
-const feishuMaxCardBytes = 24000
+// feishuMaxCardBytes is a conservative cap on card content. Feishu custom bots
+// reject a request body over 20 KB as a whole (not truncated); pick a value
+// clearly below that limit to also cover JSON wrapping overhead.
+const feishuMaxCardBytes = 16000
+
+// feishuEnvelopeBytes is the size of what Send serializes around the card when a
+// signing secret is configured (without one the request is smaller):
+//
+//	{"card":…,"msg_type":"interactive","sign":"<44 characters>","timestamp":"<10 digits>"}
+const feishuEnvelopeBytes = 113
 
 // feishuCard builds the interactive card and returns it along with the **number
 // of items actually written**. kept serves the same purpose as in markdownBody:
 // only items that actually made it into the card should be marked as sent.
 func feishuCard(m Message) (map[string]any, int) {
+	lim := m.limits()
+	// budget is the final truncation backstop for one item's text, the same role
+	// TruncateBytes plays in markdownBody. With the summary or asset limit set to
+	// 0 an item has no other bound, and an oversized card loses the whole message.
+	budget := feishuMaxCardBytes - markdownReservedBytes
+	card := map[string]any{
+		"config": map[string]any{"wide_screen_mode": true},
+		"header": map[string]any{"title": map[string]any{"tag": "plain_text", "content": markdownTitle(m)}},
+	}
+	if len(m.Items) > 0 {
+		card["header"].(map[string]any)["template"] = feishuSeverityTemplate(m.Items[0].Severity)
+	}
 	elements := []any{}
 	kept := 0
 	if m.Batch {
-		// Pack whole items first, then assemble the header: the header must state
-		// "the remaining N items will continue in the next message", and N must
-		// come from the number of items that actually fit.
-		kept = packItemCount(m.Items, feishuMaxCardBytes, markdownReservedBytes, "", byteSize, func(it Item, idx int) string {
-			return feishuBatchLine(it, idx+1)
-		})
-		items := m.Items[:kept]
-		elements = append(elements, feishuMarkdownDiv(markdownBatchIntro(m, items, len(m.Items))))
-		for i, it := range items {
-			elements = append(elements, feishuMarkdownDiv(feishuBatchLine(it, i+1)))
+		// digest assembles the elements of a digest card around the lines of its
+		// first n items. The intro must state "the remaining N items will continue
+		// in the next message", and N must come from the number of items that
+		// actually fit.
+		digest := func(n int, lines []any) []any {
+			out := []any{feishuMarkdownDiv(markdownBatchIntro(m, m.Items[:n], len(m.Items)))}
+			out = append(out, lines...)
+			if m.HomeURL != "" {
+				out = append(out, feishuButton("View all on the platform", m.HomeURL))
+			}
+			return out
 		}
-		if m.HomeURL != "" {
-			elements = append(elements, feishuButton("View all on the platform", m.HomeURL))
+		// Pack whole items (see packItemCount) against the request body as it will
+		// be serialized, not against the text of the lines. Each line is sent as
+		// its own element: about 52 bytes of JSON around the text, plus whatever
+		// the encoding escapes. Counted as text alone, several hundred short lines
+		// left as one request of more than twice the 20 KB limit. The rest of the
+		// body is measured too: it changes with the number of items kept (the
+		// intro) and with the platform link.
+		//
+		// The first item is always kept: otherwise one oversized item would jam
+		// the whole batch in place. Its text is truncated to budget.
+		var lines []any
+		used := 0
+		for i, it := range m.Items {
+			line := feishuMarkdownDiv(TruncateBytes(feishuBatchLine(it, i+1, lim), budget))
+			used += feishuJSONSize(line) + 1 // the element and its separating comma
+			card["elements"] = digest(i+1, nil)
+			if i > 0 && feishuEnvelopeBytes+feishuJSONSize(card)+used > feishuMaxCardBytes {
+				break
+			}
+			lines = append(lines, line)
 		}
+		kept = len(lines)
+		elements = digest(kept, lines)
 	} else if len(m.Items) > 0 {
 		kept = 1
 		it := m.Items[0]
-		elements = append(elements, feishuMarkdownDiv(feishuItemLines(it)))
+		elements = append(elements, feishuMarkdownDiv(TruncateBytes(feishuItemLines(it, lim), budget)))
 		if it.DetailURL != "" {
 			elements = append(elements, feishuButton("View details", it.DetailURL))
 		}
 	}
 
-	card := map[string]any{
-		"config":   map[string]any{"wide_screen_mode": true},
-		"header":   map[string]any{"title": map[string]any{"tag": "plain_text", "content": markdownTitle(m)}},
-		"elements": elements,
-	}
-	if len(m.Items) > 0 {
-		card["header"].(map[string]any)["template"] = feishuSeverityTemplate(m.Items[0].Severity)
-	}
+	card["elements"] = elements
 	return card, kept
+}
+
+// feishuJSONSize returns the number of bytes v takes in the request body.
+func feishuJSONSize(v any) int {
+	raw, _ := json.Marshal(v)
+	return len(raw)
 }
 
 func feishuMarkdownDiv(content string) map[string]any {
@@ -189,7 +227,7 @@ func feishuButton(label, url string) map[string]any {
 // emphasis, so every field coming from outside goes through markdownText
 // (single-lining + escaping) — otherwise a single vulnerability title could turn
 // into a clickable external link inside Feishu.
-func feishuItemLines(it Item) string {
+func feishuItemLines(it Item, lim Limits) string {
 	out := fmt.Sprintf("**%s · %s**", SeverityLabel(it.Severity), markdownText(it.Title(), 0))
 	if it.IsStatusChange() {
 		out += fmt.Sprintf("\n**Status change**: %s → %s",
@@ -198,11 +236,11 @@ func feishuItemLines(it Item) string {
 	if it.VulnClass != "" && it.VulnClass != it.Title() {
 		out += fmt.Sprintf("\n**Type**: %s", markdownText(it.VulnClass, 0))
 	}
-	if a := assetLine(it.Assets, maxAssetsShown); a != "" {
+	if a := assetLine(it.Assets, lim.AssetsShown); a != "" {
 		out += fmt.Sprintf("\n**Assets**: %s", markdownText(a, 0))
 	}
 	if it.Summary != "" {
-		if s := markdownText(it.Summary, maxSummaryRunes); s != "" {
+		if s := markdownText(it.Summary, lim.SummaryRunes); s != "" {
 			out += fmt.Sprintf("\n**Summary**: %s", s)
 		}
 	}
@@ -210,9 +248,9 @@ func feishuItemLines(it Item) string {
 }
 
 // feishuBatchLine renders one entry of a digest card.
-func feishuBatchLine(it Item, index int) string {
+func feishuBatchLine(it Item, index int, lim Limits) string {
 	line := fmt.Sprintf("**%d. %s · %s**", index, SeverityLabel(it.Severity), markdownText(it.Title(), 0))
-	if a := assetLine(it.Assets, maxAssetsShown); a != "" {
+	if a := assetLine(it.Assets, lim.AssetsShown); a != "" {
 		line += " — " + markdownText(a, 0)
 	}
 	return line
