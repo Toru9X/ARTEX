@@ -50,6 +50,17 @@ func TestPlannerQuietSkipEdge(t *testing.T) {
 	if !e.quietSkipEdge(tt) {
 		t.Fatal("unchanged goals + active intent must skip the edge round")
 	}
+	// 3 worker slots, 1 queued intent, nothing running -> 2 workers would sit idle -> plan
+	e.slotPlans.Store(tt.ID, map[string]int64{"w1": 0, "w2": 0, "w3": 0})
+	if e.quietSkipEdge(tt) {
+		t.Fatal("idle worker slots without queued work must allow planning")
+	}
+	// 1 slot, 1 queued intent -> the idle worker has work -> skip
+	e.slotPlans.Store(tt.ID, map[string]int64{"w1": 0})
+	if !e.quietSkipEdge(tt) {
+		t.Fatal("a queued intent for every idle slot must skip the edge round")
+	}
+	e.slotPlans.Delete(tt.ID)
 
 	// a goal closes -> the fingerprint changes -> plan
 	if err := store.SetNodeState(gid, "met"); err != nil {

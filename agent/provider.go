@@ -12,6 +12,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -382,6 +383,9 @@ func (c Config) NewProvider() (llm.Provider, error) {
 			apiKey = ollamaPlaceholderKey
 		}
 	}
+	if c.Provider() == "anthropic" && autoCacheEnabled() {
+		client.Transport = autoCacheTransport{base: client.Transport}
+	}
 	lc := llm.Config{
 		Format:     wireFormat,
 		BaseURL:    baseURL,
@@ -666,4 +670,65 @@ func TestConnection(ctx context.Context, c Config) (time.Duration, string, error
 		return lat, "", fmt.Errorf("the model returned no content (the request went through, but no text was returned)")
 	}
 	return lat, reply, nil
+}
+
+// autoCacheEnabled reports whether Anthropic-format requests get top-level
+// automatic prompt caching. On by default; ARTEX_LLM_AUTO_CACHE=off turns it
+// off for a gateway that rejects the field.
+func autoCacheEnabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv("ARTEX_LLM_AUTO_CACHE")), "off")
+}
+
+// autoCacheTransport adds a top-level cache_control to every Anthropic Messages
+// request. The API then places a breakpoint on the last cacheable block and moves
+// it forward as the conversation grows, so each agent turn reads the whole
+// history from cache instead of re-billing it at the full input price. norma
+// only marks the system prompt, never the conversation. It wraps the quota
+// transport, so LLM recording captures the body as sent.
+type autoCacheTransport struct{ base http.RoundTripper }
+
+func (t autoCacheTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodPost || !strings.HasSuffix(req.URL.Path, "/messages") || req.GetBody == nil {
+		return t.base.RoundTrip(req)
+	}
+	rc, err := req.GetBody()
+	if err != nil {
+		return t.base.RoundTrip(req)
+	}
+	body, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil {
+		return t.base.RoundTrip(req)
+	}
+	out, ok := withAutoCache(body)
+	if !ok {
+		return t.base.RoundTrip(req)
+	}
+	r2 := req.Clone(req.Context())
+	r2.Body = io.NopCloser(bytes.NewReader(out))
+	r2.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(out)), nil }
+	r2.ContentLength = int64(len(out))
+	return t.base.RoundTrip(r2)
+}
+
+// withAutoCache returns body with "cache_control":{"type":"ephemeral"} added at
+// the top level. ok is false (leave the request alone) when body is not a JSON
+// object, already sets a top-level cache_control, or has no messages.
+func withAutoCache(body []byte) ([]byte, bool) {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(body, &top) != nil {
+		return nil, false
+	}
+	if _, has := top["cache_control"]; has {
+		return nil, false
+	}
+	if _, has := top["messages"]; !has {
+		return nil, false
+	}
+	top["cache_control"] = json.RawMessage(`{"type":"ephemeral"}`)
+	out, err := json.Marshal(top)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }

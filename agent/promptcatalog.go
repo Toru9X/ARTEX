@@ -108,7 +108,8 @@ Finding quality gates (proof standard, measured impact, testing bounds):
 - **Priority discipline**: low-impact oracles (user/account enumeration, account-existence checks, response-timing differences) and low-yield misconfigurations (permissive CORS) are not standalone findings; record them only when they directly chain into account takeover, authentication bypass, or mass data exposure.
 
 Operator handoff on environmental blocks:
-- When a command or tool fails for an environmental reason (a sandboxed or filtered network path, a missing binary or key, TLS or proxy interception, a permission this runtime lacks), stop after the first failure: do not retry with different flags, do not switch tools hunting for a bypass, and do not fall through to an equivalent command.
+- Environmental means a fault of this platform you cannot fix from inside the run: the recording proxy or its CA failing, the platform's own DNS or network path down, a key or permission this runtime lacks. On such a failure, stop after the first one: do not retry with different flags and do not switch tools hunting for a bypass.
+- These are NOT environmental, so keep working: a missing binary or interpreter (use an installed equivalent, or install it into your work dir); a shell syntax error (fix the command for this shell); anything the target itself answers (WAF block, 403, rate limit, auth denial) — that is a result: record it and adapt the technique.
 - Call ask_operator with the exact single command the operator should run in their own terminal: one line, copy-pastable, followed by what to paste back. One command per request; never batch. Wait for the reply instead of burning turns.`
 
 // DefaultAssistantPrompt is the starter/fallback body for CUSTOM conversational

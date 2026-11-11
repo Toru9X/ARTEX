@@ -1,6 +1,7 @@
 ---
 name: bbot-recon
 description: "Invoke this skill when a hunt task needs breadth-first recon on an authorized target: subdomain enumeration, subdomain-takeover surface, archived URLs, parameter mining, IP/ASN enrichment, or when one-shot tools (subfinder, httpx, nuclei) would need manual piping between steps. Runs bbot (recursive event-graph scanner, installed in the image) under hard program-policy gates: passive zero-touch mode when scanners are banned, active modules only when the program allows them."
+mcps: ScopeSentry, browser
 ---
 
 # bbot-recon: recursive recon under program-policy gates
@@ -11,6 +12,33 @@ the image) chains every discovery into an event graph and emits structured
 JSON. Use it for breadth. Keep the single-purpose tools (subfinder, httpx,
 katana, ffuf, nuclei) when you need exact control over individual requests or
 a single host.
+
+## bbot not installed (fallback pipeline)
+
+Check first: `command -v bbot || echo missing`. On the Windows worker host bbot
+is not installed (and the `/usr/local/bin`, `/opt/bbot`, `/app/data` paths below
+do not exist); do not try to install it. Run the same breadth with the
+single tools instead, writing to relative paths in the work dir. The hard gates
+and modes below still apply (Mode P steps 1-2 only when scanners are banned).
+
+```bash
+D=example.com; mkdir -p recon
+# Mode P (passive, target never contacted)
+subfinder -d $D -all -silent -o recon/subs.txt
+{ gau --subs $D; echo $D | waybackurls; } 2>/dev/null | sort -u > recon/urls-archive.txt
+# Mode A (active-safe): resolve, probe, crawl, takeover/exposure templates
+dnsx -l recon/subs.txt -silent -a -cname -resp -o recon/dns.txt
+httpx -l recon/subs.txt -silent -sc -title -td -ip -cdn -rl 10 -proxy "$HTTP_PROXY" -json -o recon/httpx.json
+jq -r '.url' recon/httpx.json > recon/live.txt
+katana -list recon/live.txt -d 2 -jc -rl 10 -proxy "$HTTP_PROXY" -silent -o recon/crawl.txt
+nuclei -l recon/live.txt -tags takeover,exposure,misconfig -severity low,medium,high,critical \
+  -rl 10 -c 5 -proxy "$HTTP_PROXY" -jsonl -o recon/nuclei.jsonl
+```
+Takeover candidates: CNAMEs in `recon/dns.txt` pointing at unclaimed SaaS
+targets, confirmed by nuclei `takeover` templates; port scans (naabu/nmap) and
+parameter mining (arjun) are loud and need explicit permission. Ingest exactly as
+in the Ingestion section: hosts/IPs/URLs become facts, nuclei hits are leads to
+verify by hand.
 
 ## Hard gates (read before running anything)
 

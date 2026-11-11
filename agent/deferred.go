@@ -13,13 +13,13 @@ import (
 // placed as the LAST system-prompt segment, with DynamicBoundary set so the whole
 // (session-fixed) system prompt — including the block — is cached (design doc
 // §2.1 / C1). Skill-gated MCP names are NOT in this block; they surface when their
-// skill loads. Returns a single plain segment + boundary 0 when there is no global
-// block to add.
+// skill loads. Without a global block the single segment is still cached whole
+// (boundary 1): the system prompt is fixed for the session.
 func deferredSystem(sysText string, def DeferredInfo) (system []string, boundary int) {
 	sysText += def.FindingGuidance + def.CaseGuidance + def.IntelligenceGuidance
 	block := actool.RenderDeferredToolsBlock(def.GlobalNames)
 	if block == "" {
-		return []string{sysText}, 0
+		return []string{sysText}, 1
 	}
 	system = []string{sysText, block}
 	boundary = len(system) // b >= len → whole system prompt cached (SDK guard)

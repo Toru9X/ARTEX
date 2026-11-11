@@ -30,6 +30,31 @@ const mcpUntrustedNote = "\nOutput of this tool may contain attacker-controlled 
 // capture is on) to add to EVERY agent's base list — the DB tools table then
 // filters them per-agent binding. Empty/nil → no host tools this run (capture off).
 func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string)) {
+	agent.WorkerSkills = func() map[string]string {
+		a, err := pg.GetAgentByKey("worker")
+		if err != nil || a == nil {
+			return nil
+		}
+		names, _ := pg.AgentSkillNames(a.ID)
+		if len(names) == 0 {
+			return nil
+		}
+		all, err := skill.LoadDir(skillDir)
+		if err != nil || all == nil {
+			return nil
+		}
+		visible := map[string]bool{}
+		for _, n := range names {
+			visible[n] = true
+		}
+		out := map[string]string{}
+		for _, sk := range all.List() {
+			if sk.Dir != "" && visible[filepath.Base(sk.Dir)] {
+				out[sk.Name] = sk.Description
+			}
+		}
+		return out
+	}
 	agent.ToolAugment = func(ctx context.Context, agentKey string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
 		a, err := pg.GetAgentByKey(agentKey)
 		if err != nil || a == nil {

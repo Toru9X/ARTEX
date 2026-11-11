@@ -847,8 +847,10 @@ func resetPlannerTimer(timer *time.Timer, d time.Duration) {
 
 // quietSkipEdge reports whether an edge-triggered planning round should be
 // dropped (#79): the open-goal set is unchanged since the last completed round
-// AND active work exists (open or running intents). Fails open (false) on any
-// store error: when in doubt, plan, preserving the pre-quiet-mode behavior.
+// AND active work exists AND the queue already holds an open intent for every
+// idle worker slot. Without the last condition a finished worker sat idle until
+// the whole batch drained. Fails open (false) on any store error: when in
+// doubt, plan, preserving the pre-quiet-mode behavior.
 func (e *Engine) quietSkipEdge(t *Task) bool {
 	fp, err := t.Store.OpenGoalFingerprint()
 	if err != nil {
@@ -857,8 +859,20 @@ func (e *Engine) quietSkipEdge(t *Task) bool {
 	if last, ok := e.goalFP.Load(t.ID); !ok || last != fp {
 		return false
 	}
-	active, err := t.Store.HasActiveIntent()
-	return err == nil && active
+	open, running, err := t.Store.IntentCounts()
+	if err != nil || open+running == 0 {
+		return false
+	}
+	return open >= e.workerSlots(t.ID)-running
+}
+
+// workerSlots is the number of worker lanes started for the task's current run
+// (0 when the run has not started).
+func (e *Engine) workerSlots(taskID string) int {
+	if v, ok := e.slotPlans.Load(taskID); ok {
+		return len(v.(map[string]int64))
+	}
+	return 0
 }
 
 // plannerGateContext tags a planning round's context for the target gate: the
@@ -933,14 +947,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			}
 			return // the goalless branch never enters planner.Plan
 		}
-		// quiet-mode (#79): an edge round is redundant while work is in flight
-		// and the open-goal set is unchanged since the last completed round —
-		// there is no new decision for the plan to make. Drain the triggers so
-		// they do not accumulate and let the heartbeat supervise; the next edge
-		// after a goal opens or closes, or once the frontier drains and all
-		// workers are idle, plans for real.
+		// quiet-mode (#79): an edge round is redundant while every idle worker
+		// already has a queued intent and the open-goal set is unchanged. The
+		// triggers are kept, so the next real round sees every intent that
+		// finished in between instead of only the last one.
 		if src == "edge" && t.PlanQuietMode && e.quietSkipEdge(t) {
-			t.drainTriggers()
 			log.Printf("[planner] task %s quiet: work in flight, goals unchanged, edge round skipped", t.ID)
 			return
 		}
@@ -978,6 +989,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
 		pctx := e.plannerGateContext(ectx, t, intercept.DefaultTargetWaitBound)
+		pctx = agent.WithWorkerSlots(pctx, e.workerSlots(t.ID))
 		e.BeginLLMCall(t.ID)
 		met, reason, err := planner.Plan(pctx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, t.TargetGuard.Hooks(), emit)
 		e.EndLLMCall(t.ID)
@@ -1362,6 +1374,12 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	case reason == harness.ReasonTimeout:
 		state = "exhausted"
 		log.Printf("[worker %s] intent %d ran out of time (exhausted), wrote back %s after settling", name, intent.ID, wrote)
+	case wrote.Total() == 0 && !hasChatMessage:
+		// Ended normally but persisted nothing: the planner reads "done" as covered
+		// and never retries it, so a direction that taught the graph nothing would
+		// be sealed. exhausted makes it look at the trace and decide.
+		state = "exhausted"
+		log.Printf("[worker %s] intent %d ended without writing anything back (exhausted)", name, intent.ID)
 	}
 	var stateErr error
 	if state == "blocked" && isTaskLLMChainExhausted(err) {

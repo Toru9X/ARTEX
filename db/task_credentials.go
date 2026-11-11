@@ -22,8 +22,18 @@ type TaskCredential struct {
 	Password  string    `json:"password"`
 	Source    string    `json:"source"` // "user" | "agent"
 	Note      string    `json:"note,omitempty"`
+	Role      string    `json:"role,omitempty"`   // e.g. admin, user, viewer
+	Tenant    string    `json:"tenant,omitempty"` // org / tenant the account belongs to
+	Auth      string    `json:"auth,omitempty"`   // headers of its current logged-in session, one per line
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// credCols / scan keep the column list and the scan targets in one place.
+const credCols = `id, task_id, domain, username, password, source, note, role, tenant, auth, created_at, updated_at`
+
+func (c *TaskCredential) scan(r interface{ Scan(...any) error }) error {
+	return r.Scan(&c.ID, &c.TaskID, &c.Domain, &c.Username, &c.Password, &c.Source, &c.Note, &c.Role, &c.Tenant, &c.Auth, &c.CreatedAt, &c.UpdatedAt)
 }
 
 // TaskCredentialInput validates and normalizes one upsert. Empty username or
@@ -35,6 +45,9 @@ type TaskCredentialInput struct {
 	Password string
 	Source   string
 	Note     string
+	Role     string
+	Tenant   string
+	Auth     string
 }
 
 var ErrTaskCredentialInvalid = errors.New("credential domain and username are required")
@@ -44,6 +57,9 @@ func (in TaskCredentialInput) normalize() (TaskCredentialInput, error) {
 	in.Username = strings.TrimSpace(in.Username)
 	in.Password = strings.TrimSpace(in.Password)
 	in.Note = strings.TrimSpace(in.Note)
+	in.Role = strings.TrimSpace(in.Role)
+	in.Tenant = strings.TrimSpace(in.Tenant)
+	in.Auth = strings.TrimSpace(in.Auth)
 	if in.Source != "agent" {
 		in.Source = "user"
 	}
@@ -65,17 +81,20 @@ func (d *DB) UpsertTaskCredential(taskID int64, in TaskCredentialInput) (TaskCre
 		return TaskCredential{}, err
 	}
 	var c TaskCredential
-	err = d.QueryRow(`
-		INSERT INTO task_credentials (task_id, domain, username, password, source, note)
-		VALUES ($1, $2, $3, $4, $5, $6)
+	row := d.QueryRow(`
+		INSERT INTO task_credentials (task_id, domain, username, password, source, note, role, tenant, auth)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (task_id, domain, username) DO UPDATE
 		SET password = EXCLUDED.password,
 		    source   = EXCLUDED.source,
 		    note     = CASE WHEN EXCLUDED.note = '' THEN task_credentials.note ELSE EXCLUDED.note END,
+		    role     = CASE WHEN EXCLUDED.role = '' THEN task_credentials.role ELSE EXCLUDED.role END,
+		    tenant   = CASE WHEN EXCLUDED.tenant = '' THEN task_credentials.tenant ELSE EXCLUDED.tenant END,
+		    auth     = CASE WHEN EXCLUDED.auth = '' THEN task_credentials.auth ELSE EXCLUDED.auth END,
 		    updated_at = now()
-		RETURNING id, task_id, domain, username, password, source, note, created_at, updated_at`,
-		taskID, in.Domain, in.Username, in.Password, in.Source, in.Note).
-		Scan(&c.ID, &c.TaskID, &c.Domain, &c.Username, &c.Password, &c.Source, &c.Note, &c.CreatedAt, &c.UpdatedAt)
+		RETURNING `+credCols,
+		taskID, in.Domain, in.Username, in.Password, in.Source, in.Note, in.Role, in.Tenant, in.Auth)
+	err = c.scan(row)
 	return c, err
 }
 
@@ -83,7 +102,7 @@ func (d *DB) UpsertTaskCredential(taskID int64, in TaskCredentialInput) (TaskCre
 // ones keep their position ahead of agent-discovered ones).
 func (d *DB) TaskCredentials(taskID int64) ([]TaskCredential, error) {
 	rows, err := d.Query(`
-		SELECT id, task_id, domain, username, password, source, note, created_at, updated_at
+		SELECT `+credCols+`
 		FROM task_credentials WHERE task_id = $1 ORDER BY id`, taskID)
 	if err != nil {
 		return nil, err
@@ -92,7 +111,7 @@ func (d *DB) TaskCredentials(taskID int64) ([]TaskCredential, error) {
 	var out []TaskCredential
 	for rows.Next() {
 		var c TaskCredential
-		if err := rows.Scan(&c.ID, &c.TaskID, &c.Domain, &c.Username, &c.Password, &c.Source, &c.Note, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := c.scan(rows); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

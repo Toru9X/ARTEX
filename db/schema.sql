@@ -1403,6 +1403,12 @@ CREATE TABLE IF NOT EXISTS task_credentials (
     UNIQUE (task_id, domain, username)
 );
 
+-- Multi-identity testing: which role/tenant an account holds and the request
+-- headers of its current logged-in session, so every worker reuses one login.
+ALTER TABLE task_credentials ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_credentials ADD COLUMN IF NOT EXISTS tenant TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_credentials ADD COLUMN IF NOT EXISTS auth TEXT NOT NULL DEFAULT '';
+
 ALTER TABLE task_intercept_rules ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'block';
 DROP TRIGGER IF EXISTS trg_task_intercept_rules_upd ON task_intercept_rules;
 CREATE TRIGGER trg_task_intercept_rules_upd BEFORE UPDATE ON task_intercept_rules

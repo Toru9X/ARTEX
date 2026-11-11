@@ -1,6 +1,7 @@
 ---
 name: api-security
 description: "Invoke this skill when the task is authorized offensive testing of a REST, GraphQL, WebSocket, or SOAP API beyond recon: authentication and authorization flaws (BOLA, IDOR, BFLA), JWT and OAuth weaknesses, GraphQL-specific abuse, input validation, business logic, rate-limit trust confusion, and excessive data exposure."
+mcps: ScopeSentry, browser
 ---
 
 # API Security Testing (REST, GraphQL, WebSocket, SOAP)
@@ -21,16 +22,16 @@ Attribution: adapted from the `api-security` playbook of [zhaoxuya520/reverse-sk
 ### Phase 1: discovery (handoff from api-recon)
 
 - Spec sources: `/swagger.json`, `/openapi.json`, `/api-docs`, `/graphql`, JS bundles, robots.txt.
-- Undocumented path brute force: ffuf or kiterunner with API wordlists.
+- Undocumented path brute force, low rate: `kr scan https://host -A=apiroutes-210228:20000 -x 2 --delay 200ms -H "Authorization: Bearer $TA"` (kiterunner, route-aware), or `ffuf -u https://host/api/FUZZ -w "$ARTEX_WORDLISTS/Discovery/Web-Content/api/api-endpoints.txt" -x "$HTTP_PROXY" -rate 10 -mc all -fc 404` (fall back to a short hand list when `$ARTEX_WORDLISTS` is unset). kr has no proxy flag: replay each hit once with curl so the proxy records it.
 - GraphQL introspection, three tiers: the full introspection query; a trimmed query if the full one is blocked; minimal `__schema { types { name } }` as the last probe.
 
 ### Phase 2: authentication
 
-JWT (jwt_tool or manual):
+JWT (python; jwt_tool is not installed — use the `jwt_forge.py` helper in the auth-session-sso skill, or pyjwt via `pip3 install --target ./py pyjwt`):
 
 - [ ] `alg: none`: header rewritten, signature stripped.
 - [ ] key confusion: RS256 public key accepted as an HS256 secret.
-- [ ] weak HMAC secret: dictionary attack (`jwt_tool -C -d wordlist.txt`).
+- [ ] weak HMAC secret: offline python HMAC loop over `"$ARTEX_WORDLISTS/Passwords/scraped-JWT-secrets.txt"`.
 - [ ] expired or tampered claims: `exp`, `iat`, `sub`, `role`.
 - [ ] `kid` injection: path traversal inside the key id.
 
@@ -53,12 +54,22 @@ BOLA, object level:
 - [ ] enumerate numeric ids: `/user/1` to `/user/2`.
 - [ ] enumerate UUIDs harvested from other responses.
 - [ ] substitute usernames or emails in paths and bodies.
-- [ ] two-session replay: user A's session requesting user B's objects (Burp Autorize or a manual response diff).
+- [ ] two-session replay: user A's session requesting user B's objects (replay-and-diff script below; Burp/Autorize is not available).
+
+Two-session replay-and-diff (GET/POST/PUT/PATCH only; `reqs.txt` = `METHOD URL [json-body]` lines taken from A's traffic, `$TA`/`$TB` = tokens of A and B):
+
+```bash
+mkdir -p az; while read -r m u b; do k=$(printf %s "$m $u" | md5sum | cut -c1-8)
+  for who in A B NONE; do case $who in A) a="Authorization: Bearer $TA";; B) a="Authorization: Bearer $TB";; NONE) a="X-Anon: 1";; esac
+    curl -s -X "$m" -H "$a" -H 'Content-Type: application/json' ${b:+--data "$b"} "$u" -o "az/$k.$who" -w "$k $who %{http_code} %{size_download} $m $u\n"
+  done; done < reqs.txt | tee az/summary.txt
+```
+For every key where B (or NONE) gets the same 2xx and a similar size as A, `diff az/$k.A az/$k.B` and confirm the body carries A's owner/tenant fields; then run the attribution control (own id, nonexistent id, invalid id) before reporting.
 
 BFLA, function level:
 
 - [ ] standard user calling admin endpoints.
-- [ ] HTTP method swap: GET to PUT, PATCH, DELETE.
+- [ ] HTTP method swap: GET to PUT, PATCH (the DELETE method is blocked by the platform; skip it).
 - [ ] version downgrade: `/v2/admin` to `/v1/admin`.
 - [ ] batch-operation injection: append an admin id to the bulk body.
 
@@ -119,9 +130,10 @@ BFLA, function level:
 | Tool | Use | Notes |
 |---|---|---|
 | curl + jq | request replay and diffing | always available |
-| jwt_tool | JWT attack automation | pip-installable; verify before use |
-| ffuf, kiterunner | endpoint brute force | verify container availability |
-| Burp Autorize, AuthMatrix | two-session authorization diffing | only where a Burp instance exists |
+| python (+ pyjwt) | JWT decode, forge, offline secret check | jwt_tool is not installed |
+| ffuf, kiterunner (`kr`) | endpoint and API-route brute force | installed; low rate; replay kr hits via curl for proxy capture |
+| arjun | hidden parameter discovery | installed |
+| bash replay-and-diff (Phase 3) | two-session authorization diffing | Burp/Autorize is not installed |
 
 The upstream playbook also names Vespasian, Entropy, Escape DAST, FireTail, and api.sh; treat those as references until verified in this environment, and prefer the manual checklists over unverified tooling.
 

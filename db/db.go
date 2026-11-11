@@ -354,21 +354,81 @@ ON CONFLICT DO NOTHING`, r.kind, r.pattern, r.note); err != nil {
 	return d.SetSetting("asset_intercept_default_rules_v1", "done")
 }
 
-// builtinSkillVisibility maps a shipped skill's directory name → the built-in
-// agent keys that should see it by default. The skill FILES themselves live on the
-// filesystem (SkillDir, loaded by norma at runtime); DB only carries this visibility
-// binding. Skills omitted here (e.g. playwright-cli, scopesentry) ship invisible by
-// default — the user turns them on per-agent when needed. scopesentry additionally
-// declares `mcps: ScopeSentry`, which only takes effect once it's made visible and
-// that MCP is enabled/configured.
-var builtinSkillVisibility = map[string][]string{
-	"api-recon": {"auto", "pentest", "worker"},
-}
+// The skill FILES live on the filesystem (SkillDir, loaded by norma at
+// runtime); the DB only carries which agent sees which skill.
+//
+// Skill placement groups: which agents execute which kind of work.
+var (
+	skillExecutors = []string{"worker", "pentest", "auto", "mainagent"}
+	skillRecon     = []string{
+		"api-recon", "bbot-recon", "subdomain-enum-protocol", "wildcard-scope-dive", "origin-ip-discovery",
+		"internal-portal-discovery", "js-bundle-secrets", "source-map-exposure", "hidden-param-discovery",
+		"subdomain-takeover", "information-disclosure", "abandoned-cloud-takeover",
+	}
+	// Technique skills: executors plus the retester, which re-runs the same proofs.
+	skillTesting = []string{
+		"403-bypass", "access-control-testing", "aem-attack", "api-security", "api-security-testing",
+		"appliance-management-attacks", "aspnet-verbose-errors", "auth-bypass-testing", "backup-mft-attacks",
+		"bash-rewritemap-injection", "business-logic-testing", "cache-poisoning", "cicd-pipeline-attacks",
+		"clickjacking-testing", "cloud-container-escape", "command-injection-testing", "cors-testing",
+		"craftercms-attack", "crlf-injection", "cryptographic-failures", "csp-bypass", "csrf-testing",
+		"deserialization-testing", "dom-based-vulnerabilities", "encoding-obfuscation", "exchange-attacks",
+		"execution-after-redirect", "file-upload-testing", "firebase-misconfig", "graphql-testing", "grpc-testing",
+		"host-header-attacks", "http-status-recovery", "iis-shortname-exploitation", "imagemagick-rce",
+		"java-matrix-param-bypass", "jenkins-rce", "jwt-testing", "known-cve-exploitation", "launchdarkly-sdk",
+		"ldap-injection", "lfi-path-traversal", "m365-entra-attack", "mobile-api-testing", "nextjs-middleware-bypass",
+		"nosql-injection-testing", "oauth-testing", "okta-attack", "open-redirect", "parser-differential-attacks",
+		"php2shell", "playwright-cli", "postmessage-exploitation", "prototype-pollution", "python-pth-execution",
+		"race-condition-testing", "rate-limit-bypass", "request-smuggling", "salesforce-testing", "sap-hybris-testing",
+		"server-confusion-attacks", "session-crlf-injection", "spring-el-injection", "sql-injection-testing",
+		"ssl-vpn-testing", "ssrf-testing", "ssti-testing", "trailing-space-bypass", "two-factor-bypass",
+		"vmware-vcenter-attack", "waf-bypass", "web-llm-attacks", "websocket-testing", "windows-unicode-attacks",
+		"xss-testing", "xxe-testing",
+	}
+	skillSourceWork = []string{"codeaudit", "patch-diff"}
+	skillChains     = []string{"chains-meta", "auto-chain-discovery"}
+	skillEvidence   = []string{"testing-evidence-standards", "retraction-discipline", "triage-severity"}
+	skillReporting  = []string{"client-report-writing", "platform-triage-standards"}
+)
+
+// builtinSkillVisibility maps a shipped skill's directory name → the agent keys
+// that see it by default. Each skill goes to the agents that execute that kind
+// of work: recon to the executors and the asset mapper, techniques to the
+// executors and the retester, chain reasoning also to the planner, evidence and
+// severity discipline to whoever writes or re-checks findings, report writing
+// to the reporter. goals and credential_processor run no tests and get none.
+// rea and scopesentry are omitted: they need their MCP server (rea,
+// ScopeSentry) configured first, so the user binds them then.
+var builtinSkillVisibility = func() map[string][]string {
+	m := map[string][]string{}
+	add := func(skills []string, agents ...string) {
+		for _, sk := range skills {
+			m[sk] = append(m[sk], agents...)
+		}
+	}
+	add(skillRecon, append(skillExecutors, "asset_mapper")...)
+	add(skillTesting, append(skillExecutors, "retester")...)
+	add(skillSourceWork, skillExecutors...)
+	add(skillChains, append(skillExecutors, "planner")...)
+	add(skillEvidence, "worker", "pentest", "retester", "reporter")
+	add(skillReporting, "pentest", "reporter")
+	add([]string{"edr-bypass-re"}, "pentest", "auto")
+	return m
+}()
+
+// BuiltinSkillVisibility exposes the default skill placement (skill → agent
+// keys) to the one-time migration that applies it to existing databases.
+func BuiltinSkillVisibility() map[string][]string { return builtinSkillVisibility }
 
 // seedBuiltinSkillVisibility binds the shipped built-in skills to their default
-// agents. Insert-if-absent (ON CONFLICT DO NOTHING) so a user's later toggle-off is
-// never resurrected on restart — matches the browser-MCP / intercept-rule seed policy.
+// agents, once per database (settings flag). Turning a skill off deletes its
+// row, so re-running the insert on every start would switch it back on.
 func (d *DB) seedBuiltinSkillVisibility() error {
+	const flag = "builtin_skill_visibility_v2"
+	if v, _, _ := d.GetSetting(flag); v == "done" {
+		return nil
+	}
+	defer func() { _ = d.SetSetting(flag, "done") }()
 	for skillName, agentKeys := range builtinSkillVisibility {
 		for _, key := range agentKeys {
 			if _, err := d.Exec(`

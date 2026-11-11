@@ -1158,6 +1158,7 @@ type intentItem struct {
 	AssetIDs  []json.RawMessage `json:"asset_ids"`
 	ParentIDs []json.RawMessage `json:"parent_ids"`
 	Priority  int               `json:"priority"`
+	Skills    []string          `json:"skills"`
 }
 
 // addOneIntent creates one intent node, links its upstream lineage, and returns the id.
@@ -1203,6 +1204,9 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 		}
 	}
 	payload := map[string]any{"summary": it.Summary}
+	if sk := cleanSkillNames(it.Skills); len(sk) > 0 {
+		payload["skills"] = sk
+	}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
@@ -1235,6 +1239,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "the [target asset ids] this direction tests/attacks (**pass whenever possible**, 0/1/many; these are asset ids from list_assets, not exploration node ids): which assets (sites/endpoints/parameters/hosts etc.) this direction targets. Whenever the direction revolves around concrete assets, be sure to pass them — it is the structured marker of 'which targets this exploration hits', used for coverage dedup and linking the intent into the asset lineage. Leave empty only for pure global recon with truly no concrete target assets."},
 			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "upstream anchor ids (optional, 0/1/many): which [confirmed fact/finding] nodes this direction is synthesized from. **Only existing fact/finding node ids may be passed — not intents/goals/hints** — an intent must anchor on confirmed knowledge, finding-driven rather than planned out of thin air. Pass several when multiple facts jointly produce one new intent; leave empty for a top-level brand-new recon direction (it is automatically attached to the task's origin fact)."},
 			"priority":   intp("priority 0-10, default 5"),
+			"skills":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "names of 0-2 skills from the [Worker skills] list that fit this direction's technique or bug class; the worker loads them before it starts. Leave empty when none fits."},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -1301,12 +1306,15 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			"goal_id":     idp("goal node id"),
 			"evidence_id": idp("id of the finding/fact node that proves it"),
 			"reason":      str("why this evidence satisfies the goal"),
+			"confirm_finish": map[string]any{"type": "boolean",
+				"description": "set true only on a second call, after the tool warned that this proof ends the whole task while intents are still queued or running"},
 		}, "goal_id", "evidence_id"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
-				GoalID     json.RawMessage `json:"goal_id"`
-				EvidenceID json.RawMessage `json:"evidence_id"`
-				Reason     string          `json:"reason"`
+				GoalID        json.RawMessage `json:"goal_id"`
+				EvidenceID    json.RawMessage `json:"evidence_id"`
+				Reason        string          `json:"reason"`
+				ConfirmFinish bool            `json:"confirm_finish"`
 			}
 			_ = json.Unmarshal(in, &a)
 			goal, ev := pid(a.GoalID), pid(a.EvidenceID)
@@ -1320,6 +1328,14 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			evidenceNode, err := t.ts.GetNodeWithSources(ev)
 			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
 				return actool.Errorf("evidence_id must be a fact/finding node of this task or a directly related task"), nil
+			}
+			if msg := weakGoalEvidence(evidenceNode); msg != "" {
+				return actool.Errorf(msg), nil
+			}
+			if !a.ConfirmFinish {
+				if msg := t.finishWhileActive(goal); msg != "" {
+					return actool.Errorf(msg), nil
+				}
 			}
 			_ = t.ts.Link(ev, db.RelProves, goal)
 			_ = t.ts.SetNodeState(goal, "met")
@@ -1344,12 +1360,63 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 		})
 }
 
+// weakGoalEvidence rejects evidence that cannot prove anything on its own: the
+// task's origin fact (the seed, not a result) and facts the worker labelled
+// inferred. Returns "" when the node is acceptable.
+func weakGoalEvidence(n *db.Node) string {
+	if n.Kind != db.KindFact {
+		return ""
+	}
+	if n.State == "origin" {
+		return "evidence_id is the task's origin fact (the starting point, not a result) and cannot prove a goal"
+	}
+	var p map[string]any
+	_ = json.Unmarshal(n.Payload, &p)
+	if c, _ := p["confidence"].(string); strings.EqualFold(c, "inferred") {
+		return "evidence_id is an inferred fact; a goal needs observed evidence. Confirm it with an observed fact or a finding first"
+	}
+	return ""
+}
+
+// finishWhileActive returns a warning when marking goalID met would complete the
+// whole task (it is the last open goal) while intents are still queued or
+// running — completion cancels them. "" when the proof does not end the task or
+// nothing is in flight.
+func (t *ToolSet) finishWhileActive(goalID int64) string {
+	goals, err := t.ts.ListByKind(db.KindGoal, 1000)
+	if err != nil {
+		return ""
+	}
+	for _, g := range goals {
+		if g.ID != goalID && g.State != "met" {
+			return "" // other goals stay open: the task goes on
+		}
+	}
+	open, running, err := t.ts.IntentCounts()
+	if err != nil || open+running == 0 {
+		return ""
+	}
+	return fmt.Sprintf("this proof would complete the whole task and cancel %d running and %d queued intents. If the goal is truly and fully met, call again with confirm_finish=true; otherwise let that work finish", running, open)
+}
+
 func (t *ToolSet) goalMet() actool.CoreTool {
 	return writeTool("goal_met", "[End the entire task immediately] — call only when you are sure [all of the task's goals are truly met and it is complete overall] (note: the task as a [whole]; having met just one goal / one flag / one finding [does not count] — in that case mark that goal with prove_goal). ⚠️ It is NOT for \"ending this planning round\": if there is no new intent to dispatch this round, or you're waiting on worker output, [just end the round — do NOT call this tool] (0 intents is a perfectly normal outcome). Prefer prove_goal to prove goals one by one; goal_met is only a means to skip per-goal proofs and complete the task globally.",
-		obj(map[string]any{"reason": str("grounds for completion (must be evidence that the goals are truly met, not a round-ending reason like 'no new directions this round')")}, "reason"),
+		obj(map[string]any{
+			"reason": str("grounds for completion (must be evidence that the goals are truly met, not a round-ending reason like 'no new directions this round')"),
+			"confirm_finish": map[string]any{"type": "boolean",
+				"description": "set true only on a second call, after the tool warned that intents are still queued or running"},
+		}, "reason"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
-			var a struct{ Reason string }
+			var a struct {
+				Reason        string `json:"reason"`
+				ConfirmFinish bool   `json:"confirm_finish"`
+			}
 			_ = json.Unmarshal(in, &a)
+			if !a.ConfirmFinish && t.ts != nil {
+				if open, running, err := t.ts.IntentCounts(); err == nil && open+running > 0 {
+					return actool.Errorf(fmt.Sprintf("ending the task now cancels %d running and %d queued intents. If every goal is truly met, call again with confirm_finish=true; otherwise let that work finish", running, open)), nil
+				}
+			}
 			t.GoalMet = true
 			t.Reason = a.Reason
 			return actool.Text("acknowledged: goal marked met"), nil
@@ -1464,7 +1531,15 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			}
 		}
 		raw, _ := json.Marshal(result)
-		return actool.Text(fmt.Sprintf("finding recorded: %d\n%s", recorded.NodeID, raw)), nil
+		out := fmt.Sprintf("finding recorded: %d\n%s", recorded.NodeID, raw)
+		// Same class on the same asset was reported before (here or by another task
+		// on the shared asset graph): say so now, while the worker can still tell
+		// whether it is the same root cause.
+		if sim, err := t.ts.SimilarFindings(input.VulnClass, input.AssetIDs, recorded.FindingID); err == nil && len(sim) > 0 {
+			b, _ := json.Marshal(sim)
+			out += "\npossible_duplicates: " + string(b) + "\nIf one of these is the same root cause on the same endpoint, say so in this finding's summary (\"duplicate of finding <id>\") instead of reporting it again; if it is a distinct bug, state what differs."
+		}
+		return actool.Text(out), nil
 	})
 }
 

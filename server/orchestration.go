@@ -467,14 +467,21 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			"evidence_version": map[string]any{"type": "integer", "description": "evidence version returned by get_finding_traffic; prevents the report from overwriting newer evidence changes"},
 			"poe_level":        map[string]any{"type": "integer", "description": "proof-of-exploitation level 0-4: 1 error/timing/response variation, 2 structural manipulation, 3 actual data extracted, 4 critical impact. L3 is the minimum for verified. Omit or 0 when not proven."},
 			"evidence_quotes":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "exact lines copied from a bound proof/verification response body (get_finding_traffic). Never from memory; the server checks each one verbatim after whitespace normalization."},
+			"side_channel": map[string]any{"type": "object", "description": "for blind bugs (SSRF, XXE, command/SQL injection with no output) and XSS, whose proof is not in the target's response: kind = oob_callback (interactsh-client log) or browser_execution (browser console/dialog log); token = the unique marker (12+ chars) your payload carried, which must appear in a bound proof/verification request AND in file; file = that log, inside this task's data directory. poe_level 2+ is enough on this path.",
+				"properties": map[string]any{
+					"kind":  map[string]any{"type": "string", "enum": []any{"oob_callback", "browser_execution"}},
+					"token": map[string]any{"type": "string"},
+					"file":  map[string]any{"type": "string"},
+				}},
 		}, "finding_id", "report"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
-				EvidenceVersion *int64          `json:"evidence_version"`
-				FindingID       json.RawMessage `json:"finding_id"`
-				Report          string          `json:"report"`
-				PoELevel        *int            `json:"poe_level"`
-				EvidenceQuotes  []string        `json:"evidence_quotes"`
+				EvidenceVersion *int64            `json:"evidence_version"`
+				FindingID       json.RawMessage   `json:"finding_id"`
+				Report          string            `json:"report"`
+				PoELevel        *int              `json:"poe_level"`
+				EvidenceQuotes  []string          `json:"evidence_quotes"`
+				SideChannel     *sideChannelProof `json:"side_channel"`
 			}
 			_ = json.Unmarshal(in, &a)
 			nodeID := parseProfileID(a.FindingID) // reuses the "number or numeric string" parser
@@ -523,6 +530,9 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			// The report is saved above; verification only decides the status. A
 			// downgrade is recorded and reported, never used to drop the report.
 			status, note := s.assessFindingVerification(ctx, findingID, poe, a.EvidenceQuotes)
+			if status != db.VerificationVerified && a.SideChannel != nil {
+				status, note = s.assessSideChannel(ctx, findingID, poe, a.SideChannel)
+			}
 			if err := s.m.pg.SetFindingVerification(findingID, status, poe, note); err != nil {
 				return actool.Errorf("report saved, but verification not recorded: " + err.Error()), nil
 			}
@@ -530,7 +540,7 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			if status == db.VerificationVerified {
 				msg += fmt.Sprintf(" (POE L%d)", poe)
 			} else {
-				msg += " - " + note + "\nwarning: the report is saved but the finding is not verified. To reach verified, declare poe_level 3 or 4 and pass exact quotes copied from a bound proof/verification response body."
+				msg += " - " + note + "\nwarning: the report is saved but the finding is not verified. To reach verified, declare poe_level 3 or 4 and pass exact quotes copied from a bound proof/verification response body, or, for a blind or client-side bug, pass side_channel (an out-of-band callback or browser execution carrying a unique token that also appears in a bound proof request)."
 			}
 			return actool.Text(msg), nil
 		})
@@ -595,6 +605,9 @@ func (s *Server) seedOrchestrationTools() {
 	s.reseedWorkerPrompt()            // worker prompt: adds the evidence bar for negative conclusions (one-time)
 	s.seedReporterAgent()             // seeds the "report writer" agent + tool bindings + finding trigger (one-time)
 	s.reseedAttributionGate()         // worker/pentest gain the attribution axis, reporter the controls/limitations sections; skips prompts edited in the UI (one-time)
+	s.applySkillPlacement()           // binds each built-in skill to the agents that execute that work, enables the browser MCP (one-time)
+	s.refreshGroupCToolSchemas()      // credential role/tenant/auth, update_finding_report side_channel (one-time)
+	s.reseedThroughputDefaults()      // planner batch sizing + narrowed operator handoff, prove_goal/goal_met confirm_finish; skips UI-edited prompts (one-time)
 	s.upgradeReporterTriggerMessage() // backfill migration for old DBs: makes the reporter send evidence_version back (one-time)
 	s.seedFindingTrafficTools()       // adds optional evidence params and read-only evidence tools, preserving user config
 	s.seedFindingSeverityEnum()       // declares report_finding's severity vocabulary on rows seeded before it was an enum (one-time)
@@ -804,6 +817,123 @@ func (s *Server) reseedAttributionGate() {
 			continue
 		}
 		log.Printf("[prompts] %s prompt: appended a new default version (attribution axis + access-control vantage point; reporter also gains intended access / negative controls / limitations, one-time)", key)
+	}
+}
+
+// reseedThroughputDefaults carries two prompt changes and two tool schema
+// changes onto databases seeded before them (SeedPromptIfEmpty and SeedTool are
+// first-insert-only):
+//   - planner: batch size follows the [Worker capacity] line instead of "at most 4";
+//   - worker/pentest: the operator handoff covers only platform faults, not a
+//     missing tool or a refusal from the target;
+//   - prove_goal/goal_met: the confirm_finish parameter;
+//   - add_intent: the skills parameter.
+//
+// Like reseedAttributionGate it leaves a prompt edited on the agent page alone
+// and says so in the log; a superseded version stays in the agent's history.
+// applySkillPlacement brings an existing database to the default skill
+// placement (db.BuiltinSkillVisibility): every built-in skill becomes visible to
+// the agents that do that kind of work, and is taken off the planner, goals,
+// reporter and credential processor wherever the placement does not give it to
+// them, where it only cost prompt space. Custom agents are left alone. It also enables the browser
+// MCP, which api-recon, api-security and xss-browser-proof unlock on load: it is
+// skill-gated, so its tools stay hidden until one of those skills is invoked.
+func (s *Server) applySkillPlacement() {
+	const flag = "skill_placement_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }()
+	nonExecuting := map[string]bool{"planner": true, "goals": true, "reporter": true, "credential_processor": true}
+	ids := map[string]int64{}
+	for skillName, keys := range db.BuiltinSkillVisibility() {
+		want := map[string]bool{}
+		for _, k := range keys {
+			want[k] = true
+		}
+		for k := range want {
+			if _, ok := ids[k]; !ok {
+				if a, err := s.m.pg.GetAgentByKey(k); err == nil && a != nil {
+					ids[k] = a.ID
+				}
+			}
+			if id := ids[k]; id > 0 {
+				_ = s.m.pg.ToggleSkillVisibility(id, skillName, true)
+			}
+		}
+		for k := range nonExecuting {
+			if a, err := s.m.pg.GetAgentByKey(k); err == nil && a != nil && !want[k] {
+				_ = s.m.pg.ToggleSkillVisibility(a.ID, skillName, false)
+			}
+		}
+	}
+	if _, err := s.m.pg.Exec(`UPDATE mcp_servers SET enabled=true WHERE name=$1`, browserMCPName); err != nil {
+		log.Printf("[skills] could not enable the browser MCP: %v", err)
+	}
+	log.Printf("[skills] applied the default skill placement and enabled the browser MCP (one-time)")
+}
+
+// refreshGroupCToolSchemas carries new tool parameters onto databases whose
+// tool rows were seeded earlier (SeedTool is first-insert-only):
+// save_task_credential/list_task_credentials gain role, tenant and the shared
+// session (auth), update_finding_report gains the side_channel proof. Bindings
+// and the enabled flag are kept.
+func (s *Server) refreshGroupCToolSchemas() {
+	const flag = "tool_schema_refresh_groupc_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }()
+	for _, sd := range agent.BuiltinToolSeeds() {
+		if sd.Key != "save_task_credential" && sd.Key != "list_task_credentials" {
+			continue
+		}
+		schema, _ := json.Marshal(sd.Schema)
+		if err := s.m.pg.RefreshToolDefaults(sd.Key, sd.Desc, schema); err != nil {
+			log.Printf("[tools] refresh %s schema failed: %v", sd.Key, err)
+		}
+	}
+	t := s.toolUpdateFindingReport()
+	schema, _ := json.Marshal(t.InputSchema())
+	if err := s.m.pg.RefreshToolDefaults(t.Name(), t.Description(), schema); err != nil {
+		log.Printf("[tools] refresh %s schema failed: %v", t.Name(), err)
+	}
+}
+
+func (s *Server) reseedThroughputDefaults() {
+	const flag = "throughput_defaults_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // attempt only once regardless of outcome
+	seeds := agent.BuiltinPromptSeeds()
+	for _, key := range []string{"planner", "worker", "pentest"} {
+		tmpl := seeds[key]
+		a, err := s.m.pg.GetAgentByKey(key)
+		if tmpl == "" || err != nil || a == nil {
+			continue
+		}
+		if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
+			continue
+		}
+		if by, err := s.m.pg.CurrentPromptAuthor(a.ID); err == nil && by == "ui" {
+			log.Printf("[prompts] %s prompt was edited on the agent page, so the throughput defaults were not applied to it — reset it to the built-in default there to pick them up", key)
+			continue
+		}
+		if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
+			log.Printf("[prompts] failed to refresh the %s prompt to the new default: %v", key, err)
+			continue
+		}
+		log.Printf("[prompts] %s prompt: appended a new default version (throughput defaults, one-time)", key)
+	}
+	for _, sd := range agent.BuiltinToolSeeds() {
+		if sd.Key != "prove_goal" && sd.Key != "goal_met" && sd.Key != "add_intent" {
+			continue
+		}
+		schema, _ := json.Marshal(sd.Schema)
+		if err := s.m.pg.RefreshToolDefaults(sd.Key, sd.Desc, schema); err != nil {
+			log.Printf("[tools] refresh %s schema failed: %v", sd.Key, err)
+		}
 	}
 }
 

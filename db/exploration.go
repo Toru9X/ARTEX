@@ -876,6 +876,15 @@ WHERE exploration_id=$1 AND kind='intent' AND state='open'`, s.expID).Scan(&n)
 	return n, err
 }
 
+// IntentCounts returns this exploration's open (queued) and running intent
+// counts in one query — the planner's view of how much work is in flight versus
+// how many worker slots sit idle.
+func (s *ExplorationStore) IntentCounts() (open, running int, err error) {
+	err = s.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE state='open'), COUNT(*) FILTER (WHERE state='running')
+FROM exploration_nodes WHERE exploration_id=$1 AND kind='intent'`, s.expID).Scan(&open, &running)
+	return open, running, err
+}
+
 // GetNode returns one node of this exploration by id (nil, nil if not found).
 func (s *ExplorationStore) GetNode(id int64) (*Node, error) {
 	n, err := scanNode(s.db.QueryRow(`SELECT `+nodeCols+` FROM exploration_nodes WHERE id=$1 AND exploration_id=$2`, id, s.expID))

@@ -1,6 +1,7 @@
 ---
 name: api-recon
 description: Invoke this skill when collecting a website's API endpoints.
+mcps: ScopeSentry, browser
 ---
 
 # API Recon (frontend API reconnaissance)
@@ -299,6 +300,8 @@ Verify: `window.__API_RECON_PRELOAD__` exists; business paths do not fall back t
 cd recon && npm install
 node runtime_harvest.js config.json
 ```
+
+On the Windows worker host `/usr/bin/chromium` (the script default) does not exist: set `"chromium"` in `config.json` to a real browser, in C:/... form — Playwright's Chromium `ls "$(cygpath -m "$LOCALAPPDATA")"/ms-playwright/chromium-*/chrome-win*/chrome.exe | tail -1`, or Edge `C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe`.
 
 ### 3b — Coverage dynamic enumeration (mandatory)
 

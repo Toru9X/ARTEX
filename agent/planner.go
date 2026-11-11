@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -346,7 +347,7 @@ Task goal: {{.Goal}}
 
    **Serial exploit chains: dispatch step by step, don't split into parallel.** Strongly dependent serial chains (①→②→③, each later step depending on the previous step's actual output): don't dispatch all at once in parallel (the downstream can't get prerequisites that don't exist yet and would only repeat/spin); record the whole chain as todos with TodoWrite (one item per step), dispatch only the step "whose prerequisites are met" this round (usually the first), and after it yields facts, dispatch the next step at the next wake (the prompt will carry the todo list), marking satisfied steps completed. Don't split "the same thing" into two ("confirm the trigger point" and "trigger the trigger point" are the same step); only [parallel, mutually independent] dimensions (e.g. enumerating several unrelated endpoints) use multiple parallel intents.
 
-5. **Submit**: use [one] add_intent batch call for the filtered new directions (the intents array, at most 4 highest-value ones; don't call it once per item):
+5. **Submit**: use [one] add_intent batch call for the filtered new directions (the intents array, the highest-value ones — as many as the [Worker capacity] line of this round asks for, otherwise at most 4; don't call it once per item):
    - **summary**: one natural-language sentence describing the direction (full target address + what to do + why), no fixed categories; dedup relies mainly on comparing it against existing intents.
    - **asset_ids**: the target asset ids this direction tests/attacks (pass whenever possible; 0/1/many, from list_assets) — whenever the direction revolves around concrete assets (site/interface/parameter/host) be sure to pass them; used for coverage dedup and linking into the asset lineage; pass all for multi-asset directions; leave empty only for pure global recon with no concrete target assets.
    - **parent_ids**: which upstream nodes this direction is synthesized from (optional, 0/1/many) — when multiple facts combine into one intent pass them all; when derived from an upstream intent/finding pass its id; leave empty for a top-level brand-new direction.
@@ -387,7 +388,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	// Domain tools + the basic default tool set (Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash).
 	// When the asset-coverage feature is off, drop add_task_scope/list_untested_assets (not in the prompt).
-	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.DefaultTools()...)
+	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
 	tools, def, cleanup := AugmentTools(ctx, "planner", base)
 	defer cleanup()
@@ -398,10 +399,19 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// situation may be compressed by compaction (planner rounds are usually short — low
 	// risk). situational is spliced into input below.
 	situational := renderTriggers(ts, triggers) + renderGraphOverview(tsx.graphOverviewData())
+	// A new finding is the moment to ask what it chains into: load the chain
+	// reasoning skill into this round only (the system prompt stays stable).
+	for _, tr := range triggers {
+		if tr.Kind == "finding" {
+			situational += preloadSkills(ctx, tools, plannerFindingSkills...)
+			break
+		}
+	}
 	// Task-level deadline / endgame mode (injected via ctx, see taskclock.go). On the
 	// endgame round, the task-timeout planner wrap-up prompt is spliced into this
 	// round's user input (along with situational) as [this round's operating
 	// instruction], so it only makes the final goal judgment and produces no new intents.
+	situational += renderWorkerCapacity(ctx, ts) + renderWorkerSkills() + renderIdentityHint(ts, taskID) + renderClassCoverage(ts)
 	tc := taskClockFrom(ctx)
 	if tc.Final {
 		situational += "\n\n[Task endgame wrap-up (special instruction for this round, overriding the normal planning flow above)]: " + resolveTaskTimeoutWrapup("planner")
@@ -506,4 +516,136 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 			}
 		})
 	return tsx.GoalMet, tsx.Reason, err
+}
+
+type workerSlotsKey struct{}
+
+// WithWorkerSlots tells a planning round how many worker lanes the task runs,
+// so the planner can size its batch to the idle ones.
+func WithWorkerSlots(ctx context.Context, n int) context.Context {
+	return context.WithValue(ctx, workerSlotsKey{}, n)
+}
+
+// renderWorkerCapacity states how many worker slots would sit idle after this
+// round, so the planner fills them instead of dispatching a fixed small batch.
+// Empty when the slot count is unknown.
+func renderWorkerCapacity(ctx context.Context, ts *db.ExplorationStore) string {
+	slots, _ := ctx.Value(workerSlotsKey{}).(int)
+	if slots <= 0 || ts == nil {
+		return ""
+	}
+	open, running, err := ts.IntentCounts()
+	if err != nil {
+		return ""
+	}
+	idle := slots - running - open
+	head := fmt.Sprintf("\n\n[Worker capacity]: %d worker slots, %d running, %d queued open", slots, running, open)
+	if idle <= 0 {
+		return head + " — every slot is busy or has queued work. Add only directions clearly more valuable than the queue."
+	}
+	return head + fmt.Sprintf(" — %d slot(s) idle with nothing to claim. If uncovered, well-founded directions exist, dispatch up to %d intents this round to fill them (this overrides any \"at most 4 per round\" default). Never pad with duplicates or filler to reach the number.", idle, idle+1)
+}
+
+// WorkerSkills lists the skills the worker agent can load (name → description).
+// Wired by the server from the skill directory and the worker's visibility.
+var WorkerSkills func() map[string]string
+
+// renderWorkerSkills shows the planner which skills workers can load, so it can
+// attach the fitting ones to each intent (add_intent skills) instead of leaving
+// the worker to notice them on its own. Run data showed no worker ever loaded a
+// skill unprompted.
+func renderWorkerSkills() string {
+	if WorkerSkills == nil {
+		return ""
+	}
+	sk := WorkerSkills()
+	if len(sk) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(sk))
+	for n := range sk {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString("\n\n[Worker skills] (attach 0-2 fitting names to each new intent via add_intent skills; the worker loads them first):")
+	for _, n := range names {
+		b.WriteString("\n- " + n + ": " + firstLine(sk[n], 140))
+	}
+	return b.String()
+}
+
+// renderIdentityHint asks for test accounts while the task has fewer than two
+// usable ones: authorization bugs (IDOR/BOLA/BFLA, cross-tenant) can only be
+// proven by one identity reaching another's data. Silent once two exist.
+func renderIdentityHint(ts *db.ExplorationStore, taskID int64) string {
+	if ts == nil || taskID <= 0 {
+		return ""
+	}
+	creds, err := ts.TaskCredentials(taskID)
+	if err != nil {
+		return ""
+	}
+	usable := 0
+	for _, c := range creds {
+		if c.Password != "" || c.Auth != "" {
+			usable++
+		}
+	}
+	if usable >= 2 {
+		return ""
+	}
+	return fmt.Sprintf("\n\n[Test identities]: the task has %d usable test account(s). Authorization testing needs at least two accounts per role and one per privilege level (and per tenant when multi-tenant). If the target allows self-registration or the operator supplied accounts, dispatch one early intent to obtain them and record each with save_task_credential (role, tenant, auth) before authorization intents run.", usable)
+}
+
+// coreBugClasses are the technique skills that stand for the bug classes a web
+// or API test is expected to cover; renderClassCoverage counts intents per class
+// through the skills the planner attached to them.
+var coreBugClasses = []string{
+	"access-control-testing", "auth-bypass-testing", "business-logic-testing", "jwt-testing", "oauth-testing",
+	"sql-injection-testing", "nosql-injection-testing", "command-injection-testing", "ssti-testing",
+	"ssrf-testing", "xxe-testing", "file-upload-testing", "lfi-path-traversal", "xss-testing",
+	"deserialization-testing", "race-condition-testing", "information-disclosure",
+}
+
+// renderClassCoverage shows which core bug classes intents have targeted so far
+// and which none has, so the plan spreads across classes instead of only across
+// assets (coverage elsewhere counts assets tested, not classes tested).
+func renderClassCoverage(ts *db.ExplorationStore) string {
+	if ts == nil || WorkerSkills == nil {
+		return ""
+	}
+	avail := WorkerSkills()
+	intents, err := ts.ListByKind(db.KindIntent, 2000)
+	if err != nil || len(intents) == 0 {
+		return ""
+	}
+	count := map[string]int{}
+	for _, in := range intents {
+		for _, sk := range intentSkills(in) {
+			count[sk]++
+		}
+	}
+	var covered, missing []string
+	for _, c := range coreBugClasses {
+		if _, ok := avail[c]; !ok {
+			continue
+		}
+		if n := count[c]; n > 0 {
+			covered = append(covered, fmt.Sprintf("%s(%d)", c, n))
+		} else {
+			missing = append(missing, c)
+		}
+	}
+	if len(covered)+len(missing) == 0 {
+		return ""
+	}
+	b := "\n\n[Bug-class coverage] (intents per class, from the skills attached to them)"
+	if len(covered) > 0 {
+		b += "\n- targeted: " + strings.Join(covered, ", ")
+	}
+	if len(missing) > 0 {
+		b += "\n- not targeted yet: " + strings.Join(missing, ", ") + " — where the target has a matching surface and the constraints allow it, these are uncovered directions."
+	}
+	return b
 }

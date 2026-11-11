@@ -93,7 +93,7 @@ Read the consumer code to confirm how `getResultTree(tree, permissions)` filters
 {
   "baseUrl": "https://target/",
   "runtimeMode": "both",
-  "chromium": "/usr/bin/chromium",
+  "chromium": "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
 
   "cookies": [
     { "name": "auth", "value": "b64json:{\"id\":1,\"username\":\"admin\",\"role\":\"admin\",\"func\":{},\"permissions\":[\"*\"]}" }
@@ -273,7 +273,7 @@ grep -rhoaE '/api/[a-zA-Z0-9_./-]+' js | sort -u
 | Every API redirects to login | Interceptor gate → confirm `neutralize`; nested fields need extended walk logic |
 | Zero WS frames | Subscribes only after user interaction; lengthen `perRouteMs` |
 | Empty response bodies | Real responses exist only with `forward: true` |
-| Chromium missing | Install chromium or set `config.chromium` / `CHROMIUM` |
+| Chromium missing | Set `config.chromium` / `CHROMIUM` to a real browser in C:/... form (Playwright Chromium under `%LOCALAPPDATA%/ms-playwright/chromium-*/chrome-win*/chrome.exe`, or Edge); `/usr/bin/chromium` does not exist on Windows |
 | Many mocks but still bounces to login | Hooks too late or missing the `location.href` setter → document-start + preload |
 | Lists all empty | L3 empty arrays are normal; keep clicking tabs/settings/details |
 | Mistaking Redux actions for routes | Filter internal paths containing get/set/change/clear/toggle/upload |

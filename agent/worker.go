@@ -175,7 +175,7 @@ func defaultToolsExcept(exclude ...string) []actool.CoreTool {
 	for _, n := range exclude {
 		drop[n] = true
 	}
-	all := actool.DefaultTools()
+	all := DefaultTools()
 	out := make([]actool.CoreTool, 0, len(all))
 	for _, t := range all {
 		if !drop[t.Name()] {
@@ -278,7 +278,8 @@ Finding quality gates (proof standard, measured impact, testing bounds):
 - **Priority discipline**: low-impact oracles (user/account enumeration, account-existence checks, response-timing differences) and low-yield misconfigurations (permissive CORS) are not standalone findings; record them only when they directly chain into account takeover, authentication bypass, or mass data exposure.
 
 Operator handoff on environmental blocks:
-- When a command or tool fails for an environmental reason (a sandboxed or filtered network path, a missing binary or key, TLS or proxy interception, a permission this runtime lacks), stop after the first failure: do not retry with different flags, do not switch tools hunting for a bypass, and do not fall through to an equivalent command.
+- Environmental means a fault of this platform you cannot fix from inside the run: the recording proxy or its CA failing, the platform's own DNS or network path down, a key or permission this runtime lacks. On such a failure, stop after the first one: do not retry with different flags and do not switch tools hunting for a bypass.
+- These are NOT environmental, so keep working: a missing binary or interpreter (use an installed equivalent, or install it into your work dir); a shell syntax error (fix the command for this shell); anything the target itself answers (WAF block, 403, rate limit, auth denial) — that is a result: record it and adapt the technique.
 - Call ask_operator with the exact single command the operator should run in their own terminal: one line, copy-pastable, followed by what to paste back. One command per request; never batch. Wait for the reply instead of burning turns.`
 
 // workerTrafficBlock is section [B]: the traffic-tool note, code-injected only when
@@ -353,7 +354,39 @@ func intentAssetIDs(intent *db.Node) []int64 {
 }
 
 func renderIntentTask(intent *db.Node) string {
-	return fmt.Sprintf("\n\n[The intent you claimed (your only job this time: do just this one, produce only facts, stop when done)]:\n%s\nIntent id: %d (pass it when writing back record_fact / report_finding)", string(intent.Payload), intent.ID)
+	out := fmt.Sprintf("\n\n[The intent you claimed (your only job this time: do just this one, write back facts/assets/findings, stop when done)]:\n%s\nIntent id: %d (pass it when writing back record_fact / report_finding)", string(intent.Payload), intent.ID)
+	out += "\nReuse before refetching: other intents of this task work in sibling directories (../i<id>/); bundles, wordlists, scripts and outputs they already downloaded or wrote are there, and get_worker_output shows what they found."
+	out += "\nEscalate what you confirm: once a vulnerability is confirmed in this intent, record it with report_finding first, then keep exploiting it on the same asset with the session you already have until its real impact is shown (data read across the boundary, privilege gained, code run). Hand back to the planner only what needs a different asset or a different technique."
+	if sk := intentSkills(intent); len(sk) > 0 {
+		out += "\nSkills for this intent: " + strings.Join(sk, ", ") + " (preloaded below; follow them)."
+	}
+	out += "\nWhenever you hit a technique or bug class that a skill listed by the Skill tool covers (a new injection point, an auth flow, an upload, a WAF in the way, a chain to escalate), load that skill before exploiting it."
+	return out
+}
+
+// intentSkills returns the skill names the planner attached to an intent.
+func intentSkills(intent *db.Node) []string {
+	var p struct {
+		Skills []string `json:"skills"`
+	}
+	_ = json.Unmarshal(intent.Payload, &p)
+	return cleanSkillNames(p.Skills)
+}
+
+// cleanSkillNames trims, dedupes and caps the skill names a planner attaches to
+// an intent.
+func cleanSkillNames(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] || len(out) == 3 {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 // renderWorkerGraphOverview folds the global situational snapshot into the worker's
@@ -443,13 +476,14 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
-	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir) + w.lessonsBlock
+	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir) + w.lessonsBlock + HostToolsBlock()
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // inject the operation constraints (if any) into the system prompt; the worker strictly obeys them during execution
 	}
 	// intent block → intent-anchored assets block → launch instruction, appended to
 	// the system tail in that order (same append pattern as constraintBlock).
 	sysBody += renderIntentTask(intent)
+	sysBody += preloadSkills(ctx, tools, append(intentSkills(intent), workerAlwaysSkills...)...)
 	if as != nil {
 		if ids := intentAssetIDs(intent); len(ids) > 0 {
 			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {
