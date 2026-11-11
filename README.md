@@ -2,14 +2,41 @@
 
 # ARTEX
 
-AI autonomous penetration testing system (Go backend + Next.js frontend)
+### Next-Generation Autonomous AI Penetration Testing & Red Teaming Platform
 
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8.svg?logo=go)](go.mod)
+[![Next.js](https://img.shields.io/badge/Next.js-16.2.9-black.svg?logo=next.js)](web/package.json)
 
- Fork of [ARTEX by Autumn-27](https://github.com/Autumn-27) · English translation of the Chinese source · maintained publicly under AGPL-3.0
+**ARTEX** is a production-grade autonomous offensive security platform powered by an LLM multi-agent architecture (Go backend + Next.js frontend + PostgreSQL). It autonomously plans, explores, exploits, traces, and verifies penetration testing engagements using a dual-graph exploration engine, target approval gates, intent claim fencing, and a library of 80+ specialized offensive skills.
+
+*Maintained under AGPL-3.0 · Built upon [Norma](https://github.com/Autumn-27/Norma) agent SDK · Fork of [ARTEX](https://github.com/Autumn-27/ARTEX) & [BaaRai/ARTEX](https://github.com/BaaRai/ARTEX)*
 
 </div>
 
-<a href="https://trendshift.io/repositories/316805?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-316805" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/316805/daily?language=Go" alt="BaaRai%2FARTEX | Trendshift" width="250" height="55"/></a>
+---
+
+## Key Features & Highlights
+
+- **Dual-Graph Architecture**:
+  - **Asset Graph (Globally Shared)**: Single source of truth for assets across tasks (`root_domain` → `subdomain` → `service` → `endpoint`).
+  - **Exploration Graph (Per-Task)**: Event-driven advance chain tracking `goal` → `intent` → `fact` → `finding` with full lineage.
+- **Target Approval Gate (Human-in-the-Loop)**:
+  - Per-task opt-in gate enforcing strict boundary control on target probes.
+  - Generates interactive inline approval requests before executing unapproved or high-risk target interactions.
+- **Intent Claim Heartbeat & Fencing Tokens**:
+  - Multi-worker fault tolerance with heartbeat TTL and unclaim fencing tokens.
+  - Automatically resets crashed worker claims back to the frontier while preventing stale workers from overwriting progress.
+- **Strict Evidence Verification**:
+  - Automatically decodes `gzip`/`deflate` response bodies before validating proof quotes.
+  - Bounds raw HTTP traffic evidence directly to findings for zero-hallucination reporting.
+- **80+ Specialized Security Skills**:
+  - Extensive built-in technique library including 403 bypass, SQL injection differentials, SSRF protocol chaining, Deserialization, JWT/OAuth testing, Race conditions, WAF evasions, and more.
+- **Dynamic Adaptive Planner**:
+  - Worker capacity auto-sizing, bug-class coverage balancing, test identity (multi-account) hints, and automatic skill preloading.
+- **Traffic Tracing & Chrome/Edge Extension**:
+  - Embedded MITM proxy with CA verification.
+  - Bundled browser extension (`extension/`) to capture and ingest authenticated session traffic directly into ARTEX.
 
 ---
 
@@ -79,7 +106,7 @@ Sync asset data directly from [ScopeSentry](https://github.com/Autumn-27/ScopeSe
 ### Option 1: one-click install script (recommended)
 
 ```bash
-git clone https://github.com/BaaRai/ARTEX.git
+git clone https://github.com/Toru9X/ARTEX.git
 cd ARTEX
 ./install.sh
 ```
@@ -97,7 +124,7 @@ The web UI is published on `127.0.0.1` by default. To reach it from another mach
 ### Option 2: Docker Compose (manual)
 
 ```bash
-git clone https://github.com/BaaRai/ARTEX.git
+git clone https://github.com/Toru9X/ARTEX.git
 cd ARTEX
 cp .env.example .env          # set POSTGRES_PASSWORD, optionally ANTHROPIC_API_KEY
 docker compose up -d --build  # builds artex from this checkout + starts postgres
@@ -116,7 +143,7 @@ Legacy SSE servers usually establish the event stream with `GET /sse`, then rece
 
 ### Option 3: download prebuilt binaries (Releases)
 
-Download the zip for your platform from [Releases](https://github.com/BaaRai/ARTEX/releases); after extracting you get `artex` + `start.sh` (`start.bat` on Windows) + `skills/` + `config.example.json`:
+Download the zip for your platform from [Releases](https://github.com/Toru9X/ARTEX/releases); after extracting you get `artex` + `start.sh` (`start.bat` on Windows) + `skills/` + `config.example.json`:
 
 ```bash
 cp config.example.json config.json   # fill in the database connection
@@ -220,7 +247,7 @@ docker image prune -f          # clean up old images (optional)
 
 ### Option 3: prebuilt binaries (Releases)
 
-Download the new version's zip from [Releases](https://github.com/BaaRai/ARTEX/releases), stop the old process, then overwrite `artex` and `skills/` (keep your `config.json` and `data/`), and restart:
+Download the new version's zip from [Releases](https://github.com/Toru9X/ARTEX/releases), stop the old process, then overwrite `artex` and `skills/` (keep your `config.json` and `data/`), and restart:
 
 ```bash
 cp -r <extracted dir>/skills ./ && cp <extracted dir>/artex ./
