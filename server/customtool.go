@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
+	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -163,11 +165,11 @@ func (s *Server) pgTestCustomTool(w http.ResponseWriter, r *http.Request) {
 	var res actool.Result
 	switch req.Kind {
 	case "command":
-		res, _ = s.runCommandTool(ctx, req.Exec, params, tc)
+		res, _ = s.runCommandTool(ctx, "test", req.Exec, params, tc)
 	case "script":
 		res, _ = s.runScriptTool(ctx, "test", req.Exec, params, tc)
 	case "http":
-		res, _ = s.runHTTPTool(ctx, req.Exec, params, tc)
+		res, _ = s.runHTTPTool(ctx, "test", req.Exec, params, tc)
 	case "shell":
 		writeErr(w, 400, "shell-kind tools are bash environment declarations with no executable content")
 		return
@@ -275,11 +277,11 @@ func (s *Server) buildCustomTool(t *db.Tool) actool.CoreTool {
 		}
 		switch kind {
 		case "command":
-			return s.runCommandTool(ctx, execRaw, params, tc)
+			return s.runCommandTool(ctx, key, execRaw, params, tc)
 		case "script":
 			return s.runScriptTool(ctx, key, execRaw, params, tc)
 		case "http":
-			return s.runHTTPTool(ctx, execRaw, params, tc)
+			return s.runHTTPTool(ctx, key, execRaw, params, tc)
 		default:
 			return actool.Errorf("unknown custom tool kind: " + kind), nil
 		}
@@ -328,13 +330,18 @@ func ensureSchema(raw json.RawMessage) map[string]any {
 
 // ---------- command: render the command → reuse the Bash low-level run ----------
 
-func (s *Server) runCommandTool(ctx context.Context, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
+func (s *Server) runCommandTool(ctx context.Context, key string, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
 	var spec commandExec
 	_ = json.Unmarshal(execRaw, &spec)
 	if strings.TrimSpace(spec.Command) == "" {
 		return actool.Errorf("command is empty"), nil
 	}
 	cmd := renderTemplate(spec.Command, params, shellQuote)
+	// The hook saw the parameters, not the command they render: the target gate
+	// reads the rendered command here, also without the quoting of the parameters.
+	if res := intercept.GateRenderedCommand(ctx, key, cmd, renderTemplate(spec.Command, params, identity)); res.Code != "" {
+		return actool.Errorf(guard.TargetBlockMessage(res)), nil
+	}
 	// Reuse the low-level run Bash also uses (via the Bash CoreTool.Call): it
 	// automatically inherits the safety floor/timeout/proxy env/output overflow. The tool is a peer of Bash sharing that low level, not routed through the Bash tool for the model to call.
 	bashIn, _ := json.Marshal(map[string]any{"command": cmd})
@@ -417,7 +424,7 @@ func execPython(ctx context.Context, interp, key, code string, params map[string
 
 // ---------- http: native request + proxy ----------
 
-func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
+func (s *Server) runHTTPTool(ctx context.Context, key string, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
 	var spec httpExec
 	_ = json.Unmarshal(execRaw, &spec)
 	method := strings.ToUpper(strings.TrimSpace(spec.Method))
@@ -427,6 +434,12 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 	rawURL := renderTemplate(spec.URL, params, identity)
 	if strings.TrimSpace(rawURL) == "" {
 		return actool.Errorf("http url is empty"), nil
+	}
+	// The hook saw the parameters, not the URL they render (nor a URL written in
+	// the template): the target gate reads the rendered URL here, before the
+	// tool's own timeout starts, so a wait for an approval does not consume it.
+	if res := intercept.GateRenderedURL(ctx, key, rawURL); res.Code != "" {
+		return actool.Errorf(guard.TargetBlockMessage(res)), nil
 	}
 	var bodyReader io.Reader
 	if spec.Body != "" {
@@ -442,7 +455,9 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 		req.Header.Set(k, renderTemplate(v, params, identity))
 	}
 	client := &http.Client{Timeout: timeoutOr(spec.TimeoutMs, 30000)}
-	if tr := s.httpProxyTransport(spec); tr != nil {
+	// Every redirect hop goes through the target gate, as the rendered URL did.
+	client.CheckRedirect = intercept.RedirectCheck(key)
+	if tr := s.httpToolTransport(ctx, key, spec); tr != nil {
 		client.Transport = tr
 	}
 	resp, err := client.Do(req)
@@ -456,22 +471,42 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 	return actool.Text(actool.Capture(tc, string(b))), nil
 }
 
+// httpToolTransport is the transport of one http tool call, or nil
+// (http.DefaultTransport). A call through a proxy keeps httpProxyTransport: it
+// dials the proxy, which makes the connection to the target. A direct call in
+// a gated scope connects through the pinned dialer, to addresses a pin covers.
+func (s *Server) httpToolTransport(ctx context.Context, key string, spec httpExec) *http.Transport {
+	if tr := s.httpProxyTransport(spec); tr != nil {
+		return tr
+	}
+	if !intercept.GateOn(ctx) {
+		return nil
+	}
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	tr := base.Clone()
+	// An environment proxy would be dialled instead of the target.
+	tr.Proxy = nil
+	tr.DialContext = intercept.PinnedDialer(key, true)
+	// One request per call: no idle connection outlives the call.
+	tr.DisableKeepAlives = true
+	return tr
+}
+
 // httpProxyTransport builds a Transport for the http tool's proxy config, or nil
 // (direct). use_recording_proxy routes through the recording proxy + trusts its CA.
 func (s *Server) httpProxyTransport(spec httpExec) *http.Transport {
-	proxyStr := strings.TrimSpace(spec.Proxy)
+	proxyStr := proxyURLString(spec.Proxy)
 	var caFile string
 	if spec.UseRecordingProxy {
-		// ProxyAddr is already a complete URL while capture is on, and the global
-		// proxy is already a complete URL when capture is off. Keep both forms
-		// intact, including socks5:// and any credentials: prefixing http:// a
-		// second time corrupts them.
 		if s.m.TrafficEnabled() {
-			if addr := s.m.ProxyAddr(); addr != "" {
+			if addr := proxyURLString(s.m.ProxyAddr()); addr != "" {
 				proxyStr = addr
 				caFile = s.m.ProxyCACert()
 			}
-		} else if global := strings.TrimSpace(s.m.GlobalProxy()); global != "" {
+		} else if global := proxyURLString(s.m.GlobalProxy()); global != "" {
 			proxyStr = global
 		}
 	}
@@ -492,6 +527,17 @@ func (s *Server) httpProxyTransport(spec httpExec) *http.Transport {
 		}
 	}
 	return tr
+}
+
+// proxyURLString returns a proxy address as a URL: a bare host:port gets
+// "http://", an address that already has a scheme (as ProxyAddr returns it) is
+// kept as is.
+func proxyURLString(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.Contains(s, "://") {
+		return s
+	}
+	return "http://" + s
 }
 
 // ---------- helpers ----------

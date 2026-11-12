@@ -3,8 +3,12 @@ package guard
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/hook"
 )
@@ -37,10 +41,14 @@ func TestPreToolUsePassthrough(t *testing.T) {
 	}
 }
 
-// The target-only guard (planner, main agent) runs the target-gate seam and
-// nothing else: no intercept rule, no fallback judge, no audit-ring entry. Its
-// interceptor has no database behind it, so any read or write through it would
-// panic — passing proves the seam allows every call without touching the store.
+// The target-only guard (planner, main agent) runs the built-in deny rules and
+// the target gate: no user intercept rule, no fallback judge, no audit-ring entry
+// for a call that passes (in production the built-in rules come from the store,
+// see TestTargetOnlyGuardAppliesBuiltinDenyRules). Here the gate is off (no
+// scope, or a scope without the flag). Its interceptor has no database behind it
+// and no loaded rules, so it matches no built-in rule, and any read or write
+// through it would panic — passing proves that with the gate off every call is
+// allowed without touching the store.
 func TestTargetOnlyGuardSkipsRules(t *testing.T) {
 	calls := []struct {
 		tool  string
@@ -85,6 +93,122 @@ func TestTargetOnlyGuardSkipsRules(t *testing.T) {
 	}
 	if a := g.Attributions(); len(a) != 0 {
 		t.Errorf("target-only guard counted attributions %v, want none", a)
+	}
+}
+
+// The target-only guard applies the built-in deny rules (#124, F11), and no user
+// rule. The rules are injected into a store-less interceptor through the
+// SetRulesForTest seam, so nothing is read from or logged to a database.
+func TestTargetOnlyGuardAppliesBuiltinDenyRules(t *testing.T) {
+	newIC := func() *intercept.Interceptor {
+		ic := intercept.New(nil)
+		ic.SetRulesForTest([]db.InterceptRule{
+			{ID: 1, Name: "[built-in] Destructive system commands", Enabled: true, Priority: 100,
+				MatchTarget: "tool_input", MatchType: "regex", Action: "deny",
+				Pattern: `(?i)\b(rm\s+-rf\s+/|mkfs|dd\s+if=|:\(\)\s*\{|shutdown|reboot|>\s*/dev/sd)`,
+				Message: "Destructive command rejected"},
+			{ID: 2, Name: "No whoami", Enabled: true, Priority: 50,
+				MatchTarget: "tool_input", MatchType: "string", Action: "deny",
+				Pattern: "whoami", Message: "user rule: whoami is forbidden"},
+		})
+		return ic
+	}
+	const platform = "[ARTEX platform control, not target defense]"
+
+	g := NewTargetOnly(newIC())
+	gate := &fakeGate{t: t}
+	g.gate = gate
+	for name, ctx := range map[string]context.Context{
+		"gate off": context.Background(),
+		"gate on":  gateOn(context.Background(), "7", time.Minute),
+	} {
+		if block, msg := pre(g, ctx, "Bash", `{"command":"rm -rf /"}`); !block ||
+			!strings.HasPrefix(msg, platform) || !strings.Contains(msg, "Destructive command rejected") {
+			t.Errorf("%s: rm -rf / block=%v msg=%q, want a built-in deny", name, block, msg)
+		}
+		if block, msg := pre(g, ctx, "Bash", `{"command":"ls -la"}`); block {
+			t.Errorf("%s: a benign command was blocked: %s", name, msg)
+		}
+		if block, msg := pre(g, ctx, "Bash", `{"command":"whoami"}`); block {
+			t.Errorf("%s: a user rule was applied to the target-only guard: %s", name, msg)
+		}
+		// A tool outside the rule system is not matched, even when its text names a
+		// destructive command (a hint or an intent that describes one).
+		if block, msg := pre(g, ctx, "add_hint", `{"text":"the reset endpoint runs rm -rf / on the target"}`); block {
+			t.Errorf("%s: a tool outside the rule system was blocked: %s", name, msg)
+		}
+	}
+	// The built-in deny is decided before the gate: only the two passing Bash calls
+	// and add_hint of the gated round reached it.
+	if gate.checks != 3 || len(gate.asked) != 0 {
+		t.Errorf("gate checks=%d requests=%d, want 3 and 0", gate.checks, len(gate.asked))
+	}
+
+	// The full guard (workers) still applies the user rule.
+	full := NewWithInterceptor(newIC())
+	if block, msg := pre(full, context.Background(), "Bash", `{"command":"whoami"}`); !block || !strings.Contains(msg, "user rule: whoami is forbidden") {
+		t.Errorf("full guard: whoami block=%v msg=%q, want the user rule", block, msg)
+	}
+}
+
+// A deny rule with an oversized message reaches the model capped, with the
+// platform framing and the guidance intact.
+func TestDenyRuleReasonIsCapped(t *testing.T) {
+	ic := intercept.New(nil)
+	ic.SetRulesForTest([]db.InterceptRule{
+		{ID: 1, Name: "Huge message", Enabled: true, Priority: 50,
+			MatchTarget: "tool_input", MatchType: "string", Action: "deny",
+			Pattern: "whoami", Message: strings.Repeat("日", 20000)},
+	})
+	block, msg := pre(NewWithInterceptor(ic), context.Background(), "Bash", `{"command":"whoami"}`)
+	if !block {
+		t.Fatal("the deny rule did not block")
+	}
+	limit := maxBlockReasonRunes + utf8.RuneCountInString(systemBlockMessage("")+" …(truncated)")
+	if n := utf8.RuneCountInString(msg); n > limit {
+		t.Fatalf("message has %d runes, want at most %d", n, limit)
+	}
+	if !utf8.ValidString(msg) ||
+		!strings.HasPrefix(msg, "[ARTEX platform control, not target defense] This call was intercepted by the platform. Reason: ") ||
+		!strings.HasSuffix(msg, strings.Repeat("日", maxBlockReasonRunes)+" …(truncated). This operation is forbidden.") {
+		t.Errorf("capped message lost its framing or guidance: %q...%q", msg[:120], msg[len(msg)-120:])
+	}
+}
+
+// A target block with an oversized reason is capped the same way, and keeps the
+// target and the guidance of its code.
+func TestTargetBlockReasonIsCapped(t *testing.T) {
+	res := intercept.TargetResult{Code: intercept.TargetDenied, Host: "app.example.com", Port: 443,
+		Reason: strings.Repeat("é", 20000)}
+	msg := TargetBlockMessage(res)
+	empty := res
+	empty.Reason = ""
+	limit := maxBlockReasonRunes + utf8.RuneCountInString(TargetBlockMessage(empty)+" …(truncated)")
+	if n := utf8.RuneCountInString(msg); n > limit {
+		t.Fatalf("message has %d runes, want at most %d", n, limit)
+	}
+	if !utf8.ValidString(msg) ||
+		!strings.HasPrefix(msg, "[ARTEX platform control, not target defense] TARGET_DENIED: target app.example.com:443: ") ||
+		!strings.HasSuffix(msg, strings.Repeat("é", maxBlockReasonRunes)+" …(truncated). "+targetGuidance[intercept.TargetDenied]) {
+		t.Errorf("capped message lost its target or guidance: %q...%q", msg[:120], msg[len(msg)-120:])
+	}
+}
+
+// A reason within the cap passes through byte for byte.
+func TestShortBlockReasonUnchanged(t *testing.T) {
+	for _, s := range []string{"", "Destructive command rejected", strings.Repeat("日", maxBlockReasonRunes)} {
+		if got := capBlockReason(s); got != s {
+			t.Errorf("capBlockReason changed a reason of %d runes", utf8.RuneCountInString(s))
+		}
+	}
+	if got, want := systemBlockMessage("Destructive command rejected"),
+		"[ARTEX platform control, not target defense] This call was intercepted by the platform. Reason: Destructive command rejected. This operation is forbidden."; got != want {
+		t.Errorf("systemBlockMessage = %q, want %q", got, want)
+	}
+	res := intercept.TargetResult{Code: intercept.TargetDenied, Host: "app.example.com", Port: 443, Reason: "the request was denied"}
+	if got, want := TargetBlockMessage(res),
+		"[ARTEX platform control, not target defense] TARGET_DENIED: target app.example.com:443: the request was denied. "+targetGuidance[intercept.TargetDenied]; got != want {
+		t.Errorf("TargetBlockMessage = %q, want %q", got, want)
 	}
 }
 

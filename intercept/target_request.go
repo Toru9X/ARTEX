@@ -40,6 +40,10 @@ type TargetRequest struct {
 	ResolvedAt  time.Time
 	Reason      string        // no_pin | new_ip | revoked
 	Pin         *db.TargetPin // the active pin an approval would extend (new_ip); nil otherwise
+	ExemptVoid  bool          // a stored exemption names the target and was void for this call
+	// RedirectFrom is the origin (host:port) of the redirect that leads to the
+	// target; empty when the call names the target itself.
+	RedirectFrom string
 }
 
 // TargetResult is the outcome of RequestTargets. Code is empty when every
@@ -104,6 +108,14 @@ func (i *Interceptor) RequestTargets(ctx context.Context, scope TargetScope, too
 	ref, err := scope.ref()
 	if err != nil {
 		return TargetResult{Code: TargetGateUnavailable, Reason: err.Error()}
+	}
+	// An approval pins the addresses the request displays, so a request without
+	// any is never opened: approving it would pin nothing.
+	for _, t := range targets {
+		if len(t.ResolvedIPs) == 0 {
+			return TargetResult{Code: TargetResolveFailed, Host: t.Host, Port: t.Port,
+				Reason: "no address was resolved for " + targetName(t) + ", and an approval never pins an empty address list"}
+		}
 	}
 	if scope.WaitBound <= 0 {
 		// A call that never waits cannot own a call-bound row.
@@ -238,7 +250,8 @@ func (i *Interceptor) openTargetRequest(ctx context.Context, ref db.TargetScopeR
 	target := db.InterceptTarget{
 		Host: t.Host, Port: t.Port, Kind: t.Kind,
 		ResolvedIPs: t.ResolvedIPs, Resolver: t.Resolver, ResolvedAt: t.ResolvedAt,
-		Reason: t.Reason, Outcome: "requested", NameOnlyEffective: nameOnly,
+		Reason: t.Reason, Outcome: "requested", NameOnlyEffective: nameOnly, ExemptVoid: t.ExemptVoid,
+		RedirectFrom: t.RedirectFrom,
 	}
 	if t.Pin != nil {
 		target.PinID, target.PinVersion, target.PinnedIPs = t.Pin.ID, t.Pin.Version, t.Pin.PinnedIPs
@@ -354,6 +367,9 @@ func targetReason(scope TargetScope, t TargetRequest, ask *Decision, nameOnly bo
 		b.WriteString(ask.Message)
 		b.WriteString("\nThis call also names a target that needs approval. ")
 	}
+	if t.RedirectFrom != "" {
+		fmt.Fprintf(&b, "A redirect from %s leads to this target; the redirect was not followed. ", t.RedirectFrom)
+	}
 	name, bound := targetName(t), scope.scopeName()
 	if t.Port == 0 {
 		name += " (port not declared: every port)"
@@ -368,7 +384,8 @@ func targetReason(scope TargetScope, t TargetRequest, ask *Decision, nameOnly bo
 	fmt.Fprintf(&b, " Approving pins these addresses for %s until revoked.", bound)
 	if nameOnly {
 		b.WriteString(" Egress goes through the upstream proxy, which chooses the address it connects to." +
-			" The addresses listed are what the platform resolved. This approval is name-only.")
+			" The addresses listed are what the platform resolved. This approval is name-only." +
+			" The platform does not bind the connection to these addresses.")
 	}
 	return b.String()
 }

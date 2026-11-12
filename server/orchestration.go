@@ -170,7 +170,7 @@ func (s *Server) delegateToTask(ctx context.Context, in json.RawMessage, pick fu
 		tsx.SetAssetStore(s.m.Assets(), s.m.Assets().Companies())
 	}
 	tsx.SetNotify(t.Notify)         // generic wake-up (write ops without a dedicated callback go through it; no-op for read tools)
-	tsx.SetNotifyHint(t.NotifyHint) // add_hint → records a "human added N strategic hints: ..." entry and wakes the planner
+	tsx.SetNotifyHint(t.NotifyHint) // add_hint → records an "orchestrator added N strategic hints: ..." entry and wakes the planner
 	return pick(tsx).Call(ctx, inner, nil)
 }
 
@@ -339,12 +339,33 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 					}
 				}
 			}
+			// Target gate: a child spawned from a gated scope is gated too, and keeps
+			// the block rules of the calling task. Read from the caller's scope, never
+			// from parent_ref (optional and written by the model). Pins and allow rules
+			// are never copied. Gate-off caller or no scope: created as before.
+			var gate *bool
+			var blockRules []db.TaskInterceptRuleInput
+			if scope, ok := intercept.TargetScopeFromContext(ctx); ok && scope.Enabled != nil && scope.Enabled() {
+				on := true
+				gate = &on
+				if callerID, err := strconv.ParseInt(scope.TaskID, 10, 64); err == nil && callerID > 0 {
+					block, _, err := s.m.Assets().TaskInterceptRulesSplit(callerID)
+					if err != nil {
+						return actool.Errorf("read the block rules of the calling task: " + err.Error()), nil
+					}
+					for _, r := range block {
+						blockRules = append(blockRules, db.TaskInterceptRuleInput{Enabled: r.Enabled, Action: r.Action, Kind: r.Kind, Pattern: r.Pattern, Note: r.Note})
+					}
+				}
+			}
 			t, err := s.m.CreateTaskWithOptions(a.Description, a.Goal, db.TaskCreateOptions{
 				Name:                 name,
 				SourceTaskIDs:        sourceIDs,
 				LLMProfileIDs:        llmIDs,
 				TimeoutSeconds:       a.TimeoutSeconds,
 				PlanHeartbeatSeconds: a.PlanHeartbeatSeconds,
+				InterceptRules:       blockRules,
+				TargetGate:           gate,
 			})
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
@@ -613,6 +634,8 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedFindingSeverityEnum()       // declares report_finding's severity vocabulary on rows seeded before it was an enum (one-time)
 	s.seedFindingWorkflowTools()
 	s.seedFindingVerificationSchema() // S1: poe_level / evidence_quotes on update_finding_report, added once per DB
+	s.seedFindingEvidenceSchema()     // optional counterevidence / confidence_rationale on report_finding, added once per DB
+	s.seedFactSourceSchema()          // source enum on record_fact, added once per DB
 	if s.m.pg.GetBool(settingBrowserScreenshot, false) {
 		// Re-apply the opt-in after startup seeding, so an existing database gets
 		// both the reporter's visibility and the repaired Playwright arguments.
@@ -623,6 +646,41 @@ func (s *Server) seedOrchestrationTools() {
 	// Note: pentest's default tool bindings need no migration — BuiltinToolSeeds already seeds
 	// list_assets/insert_assets/report_finding/list_findings/list_companies together with
 	// pentest at fresh initialization (no old DBs exist in this project, so no migration).
+}
+
+// seedFactSourceSchema adds the source property (closed enum) to the record_fact
+// schema of existing databases (SeedTool is first-insert only, and ToolResolve
+// serves the stored schema, so without this the model would never see the enum).
+// Idempotent: the property is added only when the stored schema lacks it, and user
+// edits are preserved.
+func (s *Server) seedFactSourceSchema() {
+	for _, seed := range agent.BuiltinToolSeeds() {
+		if seed.Key != "record_fact" {
+			continue
+		}
+		raw, err := json.Marshal(seed.Schema)
+		if err != nil {
+			log.Printf("[facts] record_fact schema: %v", err)
+			return
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return
+		}
+		var properties map[string]json.RawMessage
+		if err := json.Unmarshal(obj["properties"], &properties); err != nil {
+			return
+		}
+		if len(properties["source"]) == 0 {
+			return
+		}
+		_, err = s.m.pg.Exec(`UPDATE tools SET schema=jsonb_set(schema,ARRAY['properties','source'],$1::jsonb,true),updated_at=now()
+WHERE key='record_fact' AND system AND NOT(COALESCE(schema->'properties','{}'::jsonb) ? 'source')`, string(properties["source"]))
+		if err != nil {
+			log.Printf("[facts] upgrade record_fact.source: %v", err)
+		}
+		return
+	}
 }
 
 // refreshBuiltinToolSchemas propagates code schema/description changes on the

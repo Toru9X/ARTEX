@@ -178,6 +178,9 @@ type triggeredRun struct {
 	taskDesc  string // task description (task-level, same across one task); rendered once when merged
 	taskGoal  string // task goal (task-level, same across one task); rendered once when merged
 	mergeable bool   // true for finding/goal event triggers (merge by taskID)
+	// targetGate: the source task had the target gate on when the event fired; a
+	// merged run is gated if any of its fires is. Never carries pins.
+	targetGate bool
 }
 
 func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDir string, opts ...Option) *Server {
@@ -1079,6 +1082,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/intercept/task/{taskID}", s.interceptListTaskItems)
 	mux.HandleFunc("GET /api/intercept/tool-config", s.interceptGetToolConfig)
 	mux.HandleFunc("PUT /api/intercept/tool-config", s.interceptSetToolConfig)
+	mux.HandleFunc("GET /api/target-gate/exemptions", s.targetGateGetExemptions)
+	mux.HandleFunc("PUT /api/target-gate/exemptions", s.targetGateSetExemptions)
+	mux.HandleFunc("GET /api/target-gate/exemptions/history", s.targetGateExemptionHistory)
 	mux.HandleFunc("GET /api/intercept/judge", s.interceptGetJudgeConfig)
 	mux.HandleFunc("PUT /api/intercept/judge", s.interceptSetJudgeConfig)
 	mux.HandleFunc("GET /api/intercept/judge/usage", s.interceptJudgeUsage) // cumulative token usage of fallback approval
