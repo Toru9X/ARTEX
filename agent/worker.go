@@ -516,7 +516,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// are kept as usual.
 	base = append(base, defaultToolsExcept("MultiEdit")...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
-	tools, def, cleanup := AugmentTools(ctx, "worker", base)
+	tools, def, cleanup := AugmentTools(WithToolQuery(ctx, nodeSummary(intent)), "worker", base)
 	defer cleanup()
 
 	// The intent is the worker's [sole duty, an invariant across the whole run] → it
@@ -558,6 +558,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 				// test scope (same conservative granularity as insertAssets). upsertTaskScope's
 				// ON CONFLICT DO NOTHING + the uq_task_scope unique index guarantee no
 				// duplicate additions; reruns/retries are idempotent no-ops as well.
+				// asset_ids can trace back to target content, so these auto rows count
+				// toward coverage only under a declared domain or IP root (db.declaredScopeFilter);
+				// coverage scope, not enforced.
 				// When the asset-coverage feature is off, the test scope (denominator) is no
 				// longer accumulated.
 				if coverageEnabled {
@@ -625,7 +628,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		NonStreaming:  w.nonStreaming(),                       // when this profile selects non-streaming, use Provider.Complete
 		MaxTokens:     w.maxTokens(),                          // 0 = send no cap; the server default decides
 
-		// Opt-in via ARTEX_UNTRUSTED_BOUNDARY (default off): nonce-frame tool output as untrusted data.
+		// On by default; ARTEX_UNTRUSTED_BOUNDARY=0 opts out: nonce-frame tool output as untrusted data.
 		UntrustedOutputBoundary: untrustedBoundaryEnabled(),
 	}
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
