@@ -1,11 +1,14 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStageAskOperatorImage(t *testing.T) {
@@ -78,5 +81,23 @@ func TestAskOperatorEnvHandoffGuidance(t *testing.T) {
 		if !strings.Contains(desc, marker) {
 			t.Errorf("ask_operator description missing env-handoff marker %q", marker)
 		}
+	}
+}
+
+// An expired token must not be treated as "the task already holds a token":
+// asking the operator for a fresh one is then the right thing to do.
+func TestJWTExpired(t *testing.T) {
+	mk := func(exp int64) string {
+		p := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, exp)))
+		return "eyJhbGciOiJub25lIn0." + p + ".sig"
+	}
+	if !jwtExpired(mk(time.Now().Add(-time.Hour).Unix())) {
+		t.Error("past exp must be expired")
+	}
+	if jwtExpired(mk(time.Now().Add(time.Hour).Unix())) {
+		t.Error("future exp must not be expired")
+	}
+	if jwtExpired("not-a-jwt") {
+		t.Error("garbage counts as not expired")
 	}
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -66,7 +67,11 @@ func (s *Server) toolAskOperator() actool.CoreTool {
 			if tokenQuestion.MatchString(q) && !strings.Contains(q, "ARTEX_TOKEN") && s.m.pg != nil {
 				if creds, err := s.m.pg.TaskCredentials(ri.TaskID); err == nil {
 					for _, c := range creds {
-						if strings.HasPrefix(strings.TrimSpace(c.Password), "eyJ") || strings.HasPrefix(strings.TrimSpace(c.Auth), "Bearer eyJ") {
+						tok := strings.TrimSpace(c.Password)
+						if !strings.HasPrefix(tok, "eyJ") {
+							tok = strings.TrimPrefix(strings.TrimSpace(c.Auth), "Bearer ")
+						}
+						if strings.HasPrefix(tok, "eyJ") && !jwtExpired(tok) {
 							return actool.Errorf("Error: this task already holds a token, and your shell has it as $ARTEX_TOKEN. A 401 \"Invalid authentication token\" is almost always a retyped or truncated copy, not an expired session. Run one minimal request with \"authorization: Bearer $ARTEX_TOKEN\" written inline; only if that is rejected too, call ask_operator again and mention ARTEX_TOKEN in the question so it goes through."), nil
 						}
 					}
@@ -128,4 +133,25 @@ func stageAskOperatorImage(dataDir, taskID, src string) ([]chatAttachment, error
 		return nil, err
 	}
 	return []chatAttachment{{Name: name, Path: "uploads/" + name, Size: st.Size()}}, nil
+}
+
+// jwtExpired reports whether a JWT's exp claim is in the past. An unreadable
+// token counts as not expired: the guard then keeps pushing back on token
+// requests, which is the safe direction.
+func jwtExpired(tok string) bool {
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return false
+	}
+	var c struct {
+		Exp float64 `json:"exp"`
+	}
+	if json.Unmarshal(raw, &c) != nil || c.Exp == 0 {
+		return false
+	}
+	return time.Now().Unix() > int64(c.Exp)
 }
