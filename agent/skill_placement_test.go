@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	actool "github.com/Autumn-27/norma/tool"
@@ -42,6 +43,9 @@ func TestPreloadSkills(t *testing.T) {
 		t.Fatalf("unexpected preload output (%d bytes): %.300s", len(out), out)
 	}
 	names := append(append(append([]string{}, workerAlwaysSkills...), plannerFindingSkills...), coreBugClasses...)
+	for _, k := range skillKeywords {
+		names = append(names, k.skill)
+	}
 	for _, v := range chatAgentSkills {
 		names = append(names, v...)
 	}
@@ -49,5 +53,26 @@ func TestPreloadSkills(t *testing.T) {
 		if _, ok := reg.Get(n); !ok {
 			t.Errorf("host preloads %q but no such skill exists", n)
 		}
+	}
+}
+
+// A goal is not closed by evidence older than the goal or by a thin write-up;
+// a finding always closes it.
+func TestThinGoalProof(t *testing.T) {
+	ts := &ToolSet{}
+	goal := &db.Node{ID: 100, Kind: db.KindGoal}
+	long := strings.Repeat("ran GET /x with param variants and compared responses; ", 8)
+	mk := func(id int64, kind, summary string) *db.Node {
+		b, _ := json.Marshal(map[string]any{"summary": summary})
+		return &db.Node{ID: id, Kind: kind, Payload: b}
+	}
+	if ts.thinGoalProof(goal, mk(50, db.KindFact, long)) == "" {
+		t.Error("a fact recorded before the goal must not close it")
+	}
+	if ts.thinGoalProof(goal, mk(150, db.KindFact, "nothing found")) == "" {
+		t.Error("a thin fact must not close a goal")
+	}
+	if ts.thinGoalProof(goal, mk(150, db.KindFinding, "x")) != "" {
+		t.Error("a finding must always close a goal")
 	}
 }

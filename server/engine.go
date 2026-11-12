@@ -999,6 +999,17 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			if e.proxyFailure != nil && isProxyFailure(err) {
 				e.proxyFailure(t.ID, err)
 			}
+		case met && e.noFindings(t):
+			// All goals closed but nothing was found: a result worth a second look,
+			// not an automatic completion. Pause for the operator, who can add
+			// goals, resume, or finish the task.
+			log.Printf("[planner] task %s judged all goals met with 0 findings (%s): paused for operator review, not completed", t.ID, reason)
+			e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
+				Summary: "The planner closed every goal but the task has no findings. It is paused for your review instead of completing: check the coverage facts, add goals if something looks thin, or complete the task yourself."})
+			if err := e.m.SetTaskPaused(t.ID, true); err != nil {
+				log.Printf("[planner] task %s could not pause for review: %v", t.ID, err)
+			}
+			e.Pause(t.ID, agent.AbortPausedByOrchestrator)
 		case met:
 			log.Printf("[planner] task %s judged all goals met: %s", t.ID, reason)
 			// All goals met → persist the task state as done (the frontend DTO shows this terminal state first).
@@ -1485,4 +1496,19 @@ func (e *Engine) claimNext(t *Task, name string) (*db.Node, string) {
 		}
 	}
 	return nil, ""
+}
+
+// noFindings reports whether the task has recorded no finding yet. Fails closed
+// on a read error (treated as "has findings") so a database hiccup never blocks
+// a legitimate completion.
+func (e *Engine) noFindings(t *Task) bool {
+	n, err := strconv.ParseInt(t.ID, 10, 64)
+	if err != nil || e.m.pg == nil {
+		return false
+	}
+	var c int
+	if e.m.pg.QueryRow(`SELECT COUNT(*) FROM findings WHERE task_id=$1`, n).Scan(&c) != nil {
+		return false
+	}
+	return c == 0
 }

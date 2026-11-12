@@ -385,7 +385,7 @@ var (
 		"vmware-vcenter-attack", "waf-bypass", "web-llm-attacks", "websocket-testing", "windows-unicode-attacks",
 		"xss-testing", "xxe-testing",
 	}
-	skillSourceWork = []string{"codeaudit", "patch-diff"}
+	skillSourceWork = []string{"codeaudit", "patch-diff", "whitebox-scanners", "event-driven-attacks", "export-report-injection"}
 	skillChains     = []string{"chains-meta", "auto-chain-discovery"}
 	skillEvidence   = []string{"testing-evidence-standards", "retraction-discipline", "triage-severity"}
 	skillReporting  = []string{"client-report-writing", "platform-triage-standards"}

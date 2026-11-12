@@ -568,7 +568,7 @@ func renderWorkerSkills() string {
 	}
 	sort.Strings(names)
 	var b strings.Builder
-	b.WriteString("\n\n[Worker skills] (attach 0-2 fitting names to each new intent via add_intent skills; the worker loads them first):")
+	b.WriteString("\n\n[Worker skills] (attach up to 3 fitting names to each new intent via add_intent skills; the worker loads them first, and technique skills matching the intent text are added automatically):")
 	for _, n := range names {
 		b.WriteString("\n- " + n + ": " + firstLine(sk[n], 140))
 	}

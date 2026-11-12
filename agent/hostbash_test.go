@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -39,5 +41,32 @@ func TestHostBashRunsBash(t *testing.T) {
 	}
 	if out, _ := run(`python3 -c "import sys; print(sys.argv[1])" path=/etc/passwd`); !strings.Contains(out, "path=/etc/passwd") {
 		t.Fatalf("argument was path-converted or python3 missing: %q", out)
+	}
+}
+
+// A Git-Bash style /c/... path to an existing file reaches native python as
+// C:/..., not as the broken C:\c\... the model produced before.
+func TestHostBashConvertsExistingPosixPaths(t *testing.T) {
+	if gitBash() == "" {
+		t.Skip("no Git Bash on this host (or not Windows)")
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "x.py")
+	if err := os.WriteFile(f, []byte("print('ok-run')"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	posix := "/" + strings.ToLower(f[:1]) + filepath.ToSlash(f[2:])
+	tool := HostBash(actool.NewBash())
+	in, _ := json.Marshal(map[string]any{"command": "python " + posix + " && python3 -c \"import sys;print(sys.argv[1])\" path=/etc/passwd"})
+	res, err := tool.Call(context.Background(), in, &actool.ToolContext{WorkingDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, c := range res.Content {
+		b.WriteString(c.Text)
+	}
+	if res.IsError || !strings.Contains(b.String(), "ok-run") || !strings.Contains(b.String(), "path=/etc/passwd") {
+		t.Fatalf("err=%v out=%q", res.IsError, b.String())
 	}
 }

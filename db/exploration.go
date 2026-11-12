@@ -2209,3 +2209,12 @@ func (s *ExplorationStore) ActivityByIDsForTerminalIntents(ids []int64) ([]Activ
 func (s *ExplorationStore) AddStandaloneFinding(taskID, nodeID int64, vulnclass, name, severity, summary, evidence, worker string, assetIDs []int64) (int64, error) {
 	return s.db.AddFinding(taskID, nodeID, vulnclass, name, severity, summary, evidence, worker, assetIDs)
 }
+
+// FinishedIntentsAfter counts intents that ended (done, exhausted, blocked) with an
+// id above afterID, i.e. work done after a given node (such as a goal) was created.
+func (s *ExplorationStore) FinishedIntentsAfter(afterID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND id > $2 AND state IN ('done','exhausted','blocked')`, s.expID, afterID).Scan(&n)
+	return n, err
+}

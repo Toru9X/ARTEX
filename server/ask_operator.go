@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,9 @@ import (
 )
 
 const askOperatorMaxImage = 10 << 20
+
+// tokenQuestion matches requests for a fresh access token or session.
+var tokenQuestion = regexp.MustCompile(`(?i)(access[_ -]?token|bearer|jwt|401|phiên (sso|đăng nhập)|token (mới|hết hạn)|cấp lại token)`)
 
 var askOperatorImageExt = map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".webp": true, ".gif": true}
 
@@ -58,6 +62,15 @@ func (s *Server) toolAskOperator() actool.CoreTool {
 			t := s.m.ResolveTask(taskID)
 			if t == nil {
 				return actool.Errorf("Error: task not found"), nil
+			}
+			if tokenQuestion.MatchString(q) && !strings.Contains(q, "ARTEX_TOKEN") && s.m.pg != nil {
+				if creds, err := s.m.pg.TaskCredentials(ri.TaskID); err == nil {
+					for _, c := range creds {
+						if strings.HasPrefix(strings.TrimSpace(c.Password), "eyJ") || strings.HasPrefix(strings.TrimSpace(c.Auth), "Bearer eyJ") {
+							return actool.Errorf("Error: this task already holds a token, and your shell has it as $ARTEX_TOKEN. A 401 \"Invalid authentication token\" is almost always a retyped or truncated copy, not an expired session. Run one minimal request with \"authorization: Bearer $ARTEX_TOKEN\" written inline; only if that is rejected too, call ask_operator again and mention ARTEX_TOKEN in the question so it goes through."), nil
+						}
+					}
+				}
 			}
 			att, err := stageAskOperatorImage(s.m.dir, taskID, req.ImagePath)
 			if err != nil {

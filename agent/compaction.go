@@ -515,9 +515,11 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 // runs on; thinking disabled (a pure summarization step).
 func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByID map[int64]*db.Node) (string, error) {
 	req := llm.CompletionRequest{
-		System:    []string{compressionSystemPrompt},
-		Messages:  []llm.Message{llm.UserText(buildCompressionInput(g, b, nodeByID))},
-		MaxTokens: 1500,
+		System:   []string{compressionSystemPrompt},
+		Messages: []llm.Message{llm.UserText(buildCompressionInput(g, b, nodeByID))},
+		// Reasoning models (GLM, DeepSeek) can spend a small cap on hidden reasoning and
+		// return an empty body even with thinking disabled; leave room for both.
+		MaxTokens: 6000,
 		Thinking:  "disabled",
 	}
 	msg, _, _, err := c.prov.Complete(ctx, req)

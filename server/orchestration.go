@@ -839,7 +839,7 @@ func (s *Server) reseedAttributionGate() {
 // MCP, which api-recon, api-security and xss-browser-proof unlock on load: it is
 // skill-gated, so its tools stay hidden until one of those skills is invoked.
 func (s *Server) applySkillPlacement() {
-	const flag = "skill_placement_v1"
+	const flag = "skill_placement_v2"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -901,7 +901,7 @@ func (s *Server) refreshGroupCToolSchemas() {
 }
 
 func (s *Server) reseedThroughputDefaults() {
-	const flag = "throughput_defaults_v1"
+	const flag = "throughput_defaults_v2"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}

@@ -280,6 +280,7 @@ Finding quality gates (proof standard, measured impact, testing bounds):
 Operator handoff on environmental blocks:
 - Environmental means a fault of this platform you cannot fix from inside the run: the recording proxy or its CA failing, the platform's own DNS or network path down, a key or permission this runtime lacks. On such a failure, stop after the first one: do not retry with different flags and do not switch tools hunting for a bypass.
 - These are NOT environmental, so keep working: a missing binary or interpreter (use an installed equivalent, or install it into your work dir); a shell syntax error (fix the command for this shell); anything the target itself answers (WAF block, 403, rate limit, auth denial) — that is a result: record it and adapt the technique.
+- A 401/403 is not proof that the session expired. Before asking the operator for a token, re-fetch it with list_task_credentials and replay ONE minimal request with the header written inline (-H "authorization: Bearer $TOKEN" -H "x-org-id: …"): an unquoted $HDRS variable holding -H '…' strings splits into broken headers and produces a false 401. Gateway 403 on a route family is a finding about the gateway, not an auth failure.
 - Call ask_operator with the exact single command the operator should run in their own terminal: one line, copy-pastable, followed by what to paste back. One command per request; never batch. Wait for the reply instead of burning turns.`
 
 // workerTrafficBlock is section [B]: the traffic-tool note, code-injected only when
@@ -364,14 +365,80 @@ func renderIntentTask(intent *db.Node) string {
 	return out
 }
 
-// intentSkills returns the skill names the planner attached to an intent.
+// intentSkills returns the skills a worker gets preloaded for an intent: the ones
+// the planner attached, plus every technique skill whose keywords appear in the
+// intent text, so a skill is not skipped just because the planner forgot it.
 func intentSkills(intent *db.Node) []string {
 	var p struct {
-		Skills []string `json:"skills"`
+		Summary string   `json:"summary"`
+		Skills  []string `json:"skills"`
 	}
 	_ = json.Unmarshal(intent.Payload, &p)
-	return cleanSkillNames(p.Skills)
+	return cleanSkillNames(append(p.Skills, skillsForText(p.Summary)...))
 }
+
+// skillKeywords maps words in an intent's text to the technique skill that covers
+// them. Names must exist in skills/ (checked by TestSkillPlacementNamesExist).
+var skillKeywords = []struct {
+	skill string
+	words []string
+}{
+	{"access-control-testing", []string{"idor", "bola", "bfla", "phân quyền", "leo quyền", "tenant", "cross-org", "authorization"}},
+	{"sql-injection-testing", []string{"sqli", "sql injection", "sql "}},
+	{"nosql-injection-testing", []string{"nosql"}},
+	{"command-injection-testing", []string{"command injection", "rce", "os command", "shell"}},
+	{"ssti-testing", []string{"ssti", "template injection", "template"}},
+	{"ssrf-testing", []string{"ssrf", "169.254", "metadata", "webhook", "url fetch"}},
+	{"xxe-testing", []string{"xxe", "xml"}},
+	{"xss-testing", []string{"xss", "script injection", "sanitiz", "dompurify"}},
+	{"csrf-testing", []string{"csrf"}},
+	{"file-upload-testing", []string{"upload", "multipart"}},
+	{"lfi-path-traversal", []string{"path traversal", "lfi", "local file", "../"}},
+	{"jwt-testing", []string{"jwt", "token claim", "alg:none", "jwks"}},
+	{"oauth-testing", []string{"oauth", "oidc", "redirect_uri", "sso"}},
+	{"auth-bypass-testing", []string{"auth bypass", "xác thực", "bypass"}},
+	{"business-logic-testing", []string{"business logic", "logic nghiệp vụ", "workflow", "vòng đời", "state"}},
+	{"race-condition-testing", []string{"race condition", "đồng thời", "concurrent"}},
+	{"deserialization-testing", []string{"deserializ", "unserialize", "pickle"}},
+	{"cors-testing", []string{"cors"}},
+	{"host-header-attacks", []string{"host header", "x-forwarded"}},
+	{"cache-poisoning", []string{"cache"}},
+	{"request-smuggling", []string{"smuggling", "desync"}},
+	{"graphql-testing", []string{"graphql"}},
+	{"websocket-testing", []string{"websocket"}},
+	{"open-redirect", []string{"open redirect", "redirect"}},
+	{"information-disclosure", []string{"information disclosure", "lộ thông tin", "stack trace", "debug"}},
+	{"js-bundle-secrets", []string{"bundle", "secret", "api key"}},
+	{"source-map-exposure", []string{"source map", ".map"}},
+	{"hidden-param-discovery", []string{"tham số ẩn", "hidden param", "ffuf", "fuzz"}},
+	{"rate-limit-bypass", []string{"rate limit"}},
+	{"waf-bypass", []string{"waf"}},
+	{"web-llm-attacks", []string{"llm", "prompt injection", "rag", "ai/"}},
+	{"codeaudit", []string{"whitebox", "mã nguồn", "source code", "đọc code", "audit code"}},
+	{"whitebox-scanners", []string{"scanner", "gitleaks", "trivy", "semgrep", "gosec", "dependency", "cve", "secret trong", "hardcode", "quét mã nguồn"}},
+	{"event-driven-attacks", []string{"kafka", "consumer", "event", "sự kiện", "webhook", "grpc", "bff", "envelope", "dlq", "sse", "bridge"}},
+	{"export-report-injection", []string{"export", "xuất", "báo cáo", "report", "csv", "xlsx", "evidence", "bằng chứng", "presign"}},
+	{"api-security-testing", []string{"api "}},
+}
+
+// skillsForText returns the skills whose keywords occur in text (lowercased match).
+func skillsForText(text string) []string {
+	text = strings.ToLower(text)
+	var out []string
+	for _, k := range skillKeywords {
+		for _, w := range k.words {
+			if strings.Contains(text, w) {
+				out = append(out, k.skill)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// maxIntentSkills caps the skills preloaded into one worker run. Each body is
+// 3-20 KB, so this bounds the system prompt at roughly 25k tokens of skills.
+const maxIntentSkills = 8
 
 // cleanSkillNames trims, dedupes and caps the skill names a planner attaches to
 // an intent.
@@ -380,7 +447,7 @@ func cleanSkillNames(in []string) []string {
 	seen := map[string]bool{}
 	for _, s := range in {
 		s = strings.TrimSpace(s)
-		if s == "" || seen[s] || len(out) == 3 {
+		if s == "" || seen[s] || len(out) == maxIntentSkills {
 			continue
 		}
 		seen[s] = true
@@ -448,11 +515,10 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
 	base := append(tsx.WorkerTools(), w.extraTools...)
-	// The worker deliberately gets no MultiEdit/Glob/Grep: precise file edits use Edit,
-	// searching goes through Bash(grep/find) — narrowing the tool surface and reducing
-	// low-value calls. The rest of the SDK default tools (Read/Write/Edit/LS/Bash/Sleep)
+	// The worker gets no MultiEdit (precise edits use Edit). Glob/Grep stay: models call
+	// them by habit and every "unknown tool" call is a wasted turn; whitebox runs read source with them. The rest of the SDK default tools (Read/Write/Edit/LS/Bash/Sleep)
 	// are kept as usual.
-	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
+	base = append(base, defaultToolsExcept("MultiEdit")...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
@@ -476,6 +542,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
+	credEnv, credNames := credentialEnv(ts, taskID)
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir) + w.lessonsBlock + HostToolsBlock()
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // inject the operation constraints (if any) into the system prompt; the worker strictly obeys them during execution
@@ -483,6 +550,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// intent block → intent-anchored assets block → launch instruction, appended to
 	// the system tail in that order (same append pattern as constraintBlock).
 	sysBody += renderIntentTask(intent)
+	sysBody += credEnvNote(credNames)
 	sysBody += preloadSkills(ctx, tools, append(intentSkills(intent), workerAlwaysSkills...)...)
 	if as != nil {
 		if ids := intentAssetIDs(intent); len(ids) > 0 {
@@ -540,7 +608,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		WebSearchProxy:        w.webSearch.Proxy,
 		// Bash subcommands' HTTP goes through the recording proxy + trusts its CA by
 		// default (tools need no -x/-k).
-		BashEnv:    proxyEnv(w.proxyAddr, w.proxyCACert),
+		BashEnv:    append(proxyEnv(w.proxyAddr, w.proxyCACert), credEnv...),
 		WorkingDir: runDir,
 		MaxTurns:   w.maxTurns, // 0 = unlimited (configurable in agent management)
 		// Wall-clock budget, judged at turn boundaries without interrupting mid-flight;

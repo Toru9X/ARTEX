@@ -80,7 +80,11 @@ func gitBash() string {
 // Microsoft Store stub, and the wordlist location exported.
 func hostBashPreamble() string {
 	b := `export LANG=C.UTF-8 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
-case "$(command -v python3 2>/dev/null)" in ""|*WindowsApps*) if command -v python >/dev/null 2>&1; then python3() { python "$@"; }; pip3() { python -m pip "$@"; }; export -f python3 pip3; fi;; esac
+_artex_conv() { _ARGS=(); local a; for a in "$@"; do if [[ "$a" =~ ^/[a-zA-Z]/ && -e "$a" ]]; then _ARGS+=("$(cygpath -m "$a")"); else _ARGS+=("$a"); fi; done; }
+python() { local r; r=$(type -P python) || return 127; _artex_conv "$@"; "$r" "${_ARGS[@]}"; }
+node() { local r; r=$(type -P node) || return 127; _artex_conv "$@"; "$r" "${_ARGS[@]}"; }
+case "$(type -P python3 2>/dev/null)" in ""|*WindowsApps*) python3() { python "$@"; }; pip3() { python -m pip "$@"; };; *) python3() { local r; r=$(type -P python3); _artex_conv "$@"; "$r" "${_ARGS[@]}"; };; esac
+export -f python python3 pip3 node _artex_conv 2>/dev/null
 `
 	if wl := wordlistDir(); wl != "" {
 		b += "export ARTEX_WORDLISTS='" + filepath.ToSlash(wl) + "'\n"
@@ -180,6 +184,8 @@ var hostToolNames = []string{
 	"nuclei", "httpx", "subfinder", "dnsx", "naabu", "katana", "hakrawler", "gau", "waybackurls",
 	"ffuf", "feroxbuster", "gobuster", "kr", "arjun", "sqlmap", "dalfox", "kxss", "crlfuzz",
 	"interactsh-client", "nmap", "jq", "gf", "gowitness", "grpcurl", "playwright-cli", "bbot",
+	// whitebox: run them on the source tree (see the whitebox-scanners skill)
+	"gitleaks", "trufflehog", "trivy", "osv-scanner", "govulncheck", "gosec", "semgrep", "opengrep", "codeql",
 }
 
 var (

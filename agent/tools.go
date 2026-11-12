@@ -1332,6 +1332,9 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			if msg := weakGoalEvidence(evidenceNode); msg != "" {
 				return actool.Errorf(msg), nil
 			}
+			if msg := t.thinGoalProof(goalNode, evidenceNode); msg != "" {
+				return actool.Errorf(msg), nil
+			}
 			if !a.ConfirmFinish {
 				if msg := t.finishWhileActive(goal); msg != "" {
 					return actool.Errorf(msg), nil
@@ -2341,4 +2344,37 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		// (by type + paginated), and decide on supplementary testing yourself.
 		t.listUntestedAssets(),
 	}
+}
+
+// Minimums for closing a goal on a negative result (a fact, not a finding).
+const (
+	goalProofMinSummary = 300 // runes of summary on the evidence fact
+	goalProofMinIntents = 3   // intents finished after the goal was set
+)
+
+// thinGoalProof refuses to close a goal on a thin negative result. A finding
+// always closes a goal. A fact must (1) have been written after the goal (so an
+// old fact cannot close a goal that was just set), (2) be a real write-up and
+// (3) come after enough finished work on this goal. Otherwise the planner closes
+// goals as soon as one worker says "nothing found" and the task completes with
+// no real coverage.
+func (t *ToolSet) thinGoalProof(goal, ev *db.Node) string {
+	if ev.Kind == db.KindFinding {
+		return ""
+	}
+	if ev.ID < goal.ID {
+		return "evidence_id was recorded before this goal existed; a goal is closed only by results produced after it was set. Dispatch intents for it and use their facts"
+	}
+	var p struct {
+		Summary string `json:"summary"`
+	}
+	_ = json.Unmarshal(ev.Payload, &p)
+	if n := len([]rune(strings.TrimSpace(p.Summary))); n < goalProofMinSummary {
+		return fmt.Sprintf("evidence fact is too thin to close a goal (%d chars, need %d+): it must state which requests were run, what came back and why the class is ruled out or unreachable", n, goalProofMinSummary)
+	}
+	done, err := t.ts.FinishedIntentsAfter(goal.ID)
+	if err == nil && done < goalProofMinIntents {
+		return fmt.Sprintf("only %d intents have finished since this goal was set (need %d): keep testing before closing it on a negative result", done, goalProofMinIntents)
+	}
+	return ""
 }

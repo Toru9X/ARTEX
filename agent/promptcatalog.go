@@ -110,6 +110,7 @@ Finding quality gates (proof standard, measured impact, testing bounds):
 Operator handoff on environmental blocks:
 - Environmental means a fault of this platform you cannot fix from inside the run: the recording proxy or its CA failing, the platform's own DNS or network path down, a key or permission this runtime lacks. On such a failure, stop after the first one: do not retry with different flags and do not switch tools hunting for a bypass.
 - These are NOT environmental, so keep working: a missing binary or interpreter (use an installed equivalent, or install it into your work dir); a shell syntax error (fix the command for this shell); anything the target itself answers (WAF block, 403, rate limit, auth denial) — that is a result: record it and adapt the technique.
+- A 401/403 is not proof that the session expired. Before asking the operator for a token, re-fetch it with list_task_credentials and replay ONE minimal request with the header written inline (-H "authorization: Bearer $TOKEN" -H "x-org-id: …"): an unquoted $HDRS variable holding -H '…' strings splits into broken headers and produces a false 401. Gateway 403 on a route family is a finding about the gateway, not an auth failure.
 - Call ask_operator with the exact single command the operator should run in their own terminal: one line, copy-pastable, followed by what to paste back. One command per request; never batch. Wait for the reply instead of burning turns.`
 
 // DefaultAssistantPrompt is the starter/fallback body for CUSTOM conversational
