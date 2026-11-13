@@ -13,6 +13,13 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   artex:
     # Built from this checkout. The previous reference was a third-party
@@ -66,6 +73,18 @@ services:
       # skill changes require no image rebuild — the container reads the host copy.
       - ./skills:/app/skills
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    # Chromium needs more than Docker's default 64 MB /dev/shm to prevent tab crashes.
+    shm_size: "1gb"
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   pgdata:

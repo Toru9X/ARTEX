@@ -272,13 +272,29 @@ RUN set -eux; \
 # Then install playwright (browser management) and preinstall chromium plus its system
 # dependencies via --with-deps, so MCP/CLI work on first start inside the container
 # without downloading browsers over the network. All three are pinned; upgrade deliberately.
-ARG PLAYWRIGHT_MCP_VERSION=0.0.83
-ARG PLAYWRIGHT_CLI_VERSION=0.1.22
-ARG PLAYWRIGHT_VERSION=1.64.1
+ARG PLAYWRIGHT_MCP_VERSION=0.0.85
+ARG PLAYWRIGHT_CLI_VERSION=0.1.24
+ARG PLAYWRIGHT_VERSION=1.65.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    NODE_PATH=/usr/local/lib/node_modules
 RUN npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "@playwright/cli@${PLAYWRIGHT_CLI_VERSION}" "playwright@${PLAYWRIGHT_VERSION}" \
     && playwright-cli --help \
     && playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/*
+    && for pw in /usr/local/lib/node_modules/@playwright/*/node_modules/playwright/cli.js; do \
+         [ -f "$pw" ] && node "$pw" install chromium; \
+       done \
+    && npm cache clean --force \
+    && rm -rf /root/.npm /var/lib/apt/lists/*
+
+# Point /usr/bin/chromium to Playwright's Chromium binary so recon tools (api-recon, gowitness) can find it.
+RUN set -eux; \
+    CHROME_BIN="$(find /ms-playwright -path '*/chrome-linux*/chrome' -type f | head -n1)"; \
+    test -n "$CHROME_BIN"; \
+    ln -sf "$CHROME_BIN" /usr/bin/chromium; \
+    ln -sf "$CHROME_BIN" /usr/bin/chromium-browser; \
+    chmod -R a+rX /ms-playwright; \
+    "$CHROME_BIN" --version
+
 WORKDIR /app
 # Binary compiled from source in the build stage above.
 COPY --from=build /out/artex /app/artex
@@ -286,7 +302,9 @@ COPY --from=build /out/artex /app/artex
 # to artex — docker stop only signals PID 1; without forwarding, artex never receives it,
 # cannot shut down gracefully, and is hard-killed by SIGKILL after 10 seconds.
 COPY start.sh /app/start.sh
-RUN chmod +x /app/artex /app/start.sh && mkdir -p /app/keys
+RUN chmod +x /app/artex /app/start.sh \
+    && mkdir -p /app/data /app/keys /app/.playwright \
+    && printf '%s\n' '{"browser":{"browserName":"chromium","launchOptions":{"args":["--no-sandbox"]}}}' > /app/.playwright/cli.config.json
 COPY skills/ /app/skills/
 # persistence points: data/ (SQLite, task files) and keys/ (jwt.key, via ARTEX_JWT_KEY_DIR)
 VOLUME ["/app/data", "/app/keys"]
