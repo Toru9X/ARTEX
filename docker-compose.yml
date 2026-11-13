@@ -43,6 +43,10 @@ services:
       # Noise profile for target requests: off (default) | quiet | balanced | aggressive.
       ARTEX_NOISE_PROFILE: ${ARTEX_NOISE_PROFILE:-}
       ARTEX_TARGET_USER_AGENT: ${ARTEX_TARGET_USER_AGENT:-}
+      # Cross-task lessons: off (default) | shadow | inject. Tool RAG: 1 enables BM25 tool filtering.
+      ARTEX_RSI_LESSONS: ${ARTEX_RSI_LESSONS:-}
+      ARTEX_TOOL_RAG: ${ARTEX_TOOL_RAG:-}
+      ARTEX_TOOL_RAG_TOPK: ${ARTEX_TOOL_RAG_TOPK:-}
       # Hierarchical run budgets: unset or 0 = unlimited (no change). See README.
       ARTEX_TASK_BUDGET_TOKENS: ${ARTEX_TASK_BUDGET_TOKENS:-}
       ARTEX_TASK_BUDGET_TURNS: ${ARTEX_TASK_BUDGET_TURNS:-}

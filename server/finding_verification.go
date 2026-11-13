@@ -13,6 +13,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/evidence"
@@ -46,7 +49,7 @@ func normalizeEvidenceText(s string) string {
 
 // decodeEvidenceBody undoes the HTTP Content-Encoding declared in respHead on a
 // captured response body, returning at most limit decoded bytes. Only identity
-// and one layer of gzip or deflate are handled. Any other coding, a stacked
+// and one layer of gzip, deflate, br or zstd are handled. Any other coding, a stacked
 // coding or a stream that does not decode is an error: the raw bytes are never
 // returned in place of a failed decode.
 func decodeEvidenceBody(respHead string, raw []byte, limit int) (out []byte, truncated bool, err error) {
@@ -59,7 +62,7 @@ func decodeEvidenceBody(respHead string, raw []byte, limit int) (out []byte, tru
 		for _, v := range strings.Split(value, ",") {
 			switch v = strings.ToLower(strings.TrimSpace(v)); v {
 			case "", "identity":
-			case "gzip", "deflate":
+			case "gzip", "deflate", "br", "zstd":
 				if coding != "" {
 					return nil, false, fmt.Errorf("unsupported content-encoding: more than one compressed layer")
 				}
@@ -76,6 +79,14 @@ func decodeEvidenceBody(respHead string, raw []byte, limit int) (out []byte, tru
 	switch {
 	case coding == "gzip":
 		zr, err = gzip.NewReader(bytes.NewReader(raw))
+	case coding == "br":
+		zr = brotli.NewReader(bytes.NewReader(raw))
+	case coding == "zstd":
+		var zd *zstd.Decoder
+		if zd, err = zstd.NewReader(bytes.NewReader(raw), zstd.WithDecoderConcurrency(1)); err == nil {
+			defer zd.Close()
+			zr = zd
+		}
 	case len(raw) >= 2 && raw[0]&0x0f == 8 && raw[0]>>4 <= 7 && (uint(raw[0])<<8|uint(raw[1]))%31 == 0:
 		// HTTP "deflate" is the zlib format (RFC 9110); some servers send a bare
 		// deflate stream instead, told apart by the zlib header.

@@ -13,6 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/evidence"
 )
@@ -108,9 +111,9 @@ func TestDecodeEvidenceBodyIdentityAndNoHeaderUnchanged(t *testing.T) {
 func TestDecodeEvidenceBodyUnknownEncodingFails(t *testing.T) {
 	raw := gzipBody(t, []byte(decodeHTML))
 	for _, head := range []string{
-		"HTTP 200\nContent-Encoding: br\n",
-		"HTTP 200\nContent-Encoding: gzip, br\n",
-		"HTTP 200\nContent-Encoding: gzip\nContent-Encoding: zstd\n",
+		"HTTP 200\nContent-Encoding: compress\n",
+		"HTTP 200\nContent-Encoding: gzip, x-custom\n",
+		"HTTP 200\nContent-Encoding: gzip\nContent-Encoding: snappy\n",
 	} {
 		out, _, err := decodeEvidenceBody(head, raw, verificationReadCap)
 		if err == nil || !strings.Contains(err.Error(), "unsupported content-encoding") || out != nil {
@@ -124,6 +127,8 @@ func TestDecodeEvidenceBodyTwoLayersFails(t *testing.T) {
 	for _, head := range []string{
 		"HTTP 200\nContent-Encoding: gzip, gzip\n",
 		"HTTP 200\nContent-Encoding: gzip\nContent-Encoding: deflate\n",
+		"HTTP 200\nContent-Encoding: gzip, br\n",
+		"HTTP 200\nContent-Encoding: zstd\nContent-Encoding: gzip\n",
 	} {
 		out, _, err := decodeEvidenceBody(head, raw, verificationReadCap)
 		if err == nil || !strings.Contains(err.Error(), "unsupported content-encoding") || out != nil {
@@ -182,6 +187,35 @@ func TestDecodeEvidenceBodyDeflate(t *testing.T) {
 	}
 }
 
+// br and zstd are what CDNs (Cloudflare, Fastly) send to modern clients.
+func TestDecodeEvidenceBodyBrotliAndZstd(t *testing.T) {
+	bodies := map[string][]byte{
+		"br": compressBody(t, func(w io.Writer) io.WriteCloser { return brotli.NewWriter(w) }, []byte(decodeHTML)),
+		"zstd": compressBody(t, func(w io.Writer) io.WriteCloser {
+			zw, err := zstd.NewWriter(w)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return zw
+		}, []byte(decodeHTML)),
+	}
+	for name, raw := range bodies {
+		head := "HTTP 200\nContent-Encoding: " + strings.ToUpper(name) + "\n"
+		out, truncated, err := decodeEvidenceBody(head, raw, verificationReadCap)
+		if err != nil || truncated || string(out) != decodeHTML {
+			t.Fatalf("%s: out=%q truncated=%v err=%v", name, out, truncated, err)
+		}
+		if out, _, err := decodeEvidenceBody(head, raw[:len(raw)-3], verificationReadCap); err == nil || out != nil {
+			t.Fatalf("truncated %s: out=%d bytes err=%v, want an error and no bytes", name, len(out), err)
+		}
+		store, snap := decodeSnapshot(t, head, raw)
+		bb, err := readBoundResponse(store, snap)
+		if err != nil || !quoteInBodies(normalizeEvidenceText(decodeQuote), []boundBody{bb}) {
+			t.Fatalf("%s bound: %+v err=%v, want the quote found", name, bb, err)
+		}
+	}
+}
+
 func TestDecodeBoundResponseGzipTextIsSearchable(t *testing.T) {
 	store, snap := decodeSnapshot(t, decodeGzipHead, gzipBody(t, []byte(decodeHTML)))
 	bb, err := readBoundResponse(store, snap)
@@ -217,9 +251,14 @@ func TestDecodeBoundResponseBadGzipIsAnError(t *testing.T) {
 	if bb, err := readBoundResponse(store, snap); err == nil {
 		t.Fatalf("truncated gzip: got %+v, want an error", bb)
 	}
-	store, snap = decodeSnapshot(t, "HTTP 200\nContent-Encoding: br\n", raw)
+	store, snap = decodeSnapshot(t, "HTTP 200\nContent-Encoding: compress\n", raw)
 	if bb, err := readBoundResponse(store, snap); err == nil || !strings.Contains(err.Error(), "unsupported content-encoding") {
-		t.Fatalf("br: got %+v err=%v, want unsupported content-encoding", bb, err)
+		t.Fatalf("compress: got %+v err=%v, want unsupported content-encoding", bb, err)
+	}
+	// A br header over gzip bytes does not decode: an error, never the raw bytes.
+	store, snap = decodeSnapshot(t, "HTTP 200\nContent-Encoding: br\n", raw)
+	if bb, err := readBoundResponse(store, snap); err == nil {
+		t.Fatalf("br over gzip bytes: got %+v, want an error", bb)
 	}
 }
 

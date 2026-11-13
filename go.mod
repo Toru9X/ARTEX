@@ -4,6 +4,7 @@ go 1.26.10
 
 require (
 	github.com/Autumn-27/norma v0.4.5-0.20261018113434-4f5684e56760
+	github.com/andybalholm/brotli v1.2.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
@@ -19,7 +20,6 @@ require (
 )
 
 require (
-	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/creack/pty v1.1.24 // indirect

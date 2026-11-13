@@ -18,7 +18,7 @@ import (
 
 // maxPreloadedSkillBytes caps one preloaded skill body.
 // ponytail: hard cap, a long skill is cut; per-section loading if that bites.
-const maxPreloadedSkillBytes = 24 << 10
+const maxPreloadedSkillBytes = 64 << 10
 
 // preloadSkills invokes each named skill through the run's Skill tool and
 // returns a system-prompt block with their instructions. Names the agent cannot
