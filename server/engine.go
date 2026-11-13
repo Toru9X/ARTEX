@@ -1121,39 +1121,54 @@ func startClaimHeartbeat(store *db.ExplorationStore, interval time.Duration, lab
 	return func() { close(quit); <-done }
 }
 
+// laneWorker picks the Worker for one lane, or nil to idle and retry. A pinned
+// lane resolves its own Worker. A pin outside the task's own LLM chain yields to
+// that chain (the task owns its routing); any other failure idles the lane, so
+// the task keeps running on its other lanes rather than silently switching
+// model. lastErr suppresses repeating the same log line every retry.
+func (e *Engine) laneWorker(t *Task, slot WorkerSlot, lastErr *string) *agent.Worker {
+	if slot.ProfileID <= 0 || e.workerResolve == nil {
+		_, w := e.snapshotFor(t)
+		return w
+	}
+	resolved, err := e.workerResolve(t, slot)
+	switch {
+	case err == nil:
+		*lastErr = ""
+		return resolved
+	case errors.Is(err, errSlotOutsideChain):
+		_, w := e.snapshotFor(t)
+		return w
+	}
+	if msg := err.Error(); msg != *lastErr {
+		*lastErr = msg
+		log.Printf("[worker %s] task %s pinned profile #%d unavailable: %v", slot.Name, t.ID, slot.ProfileID, err)
+	}
+	return nil
+}
+
 func (e *Engine) workerLoop(ctx context.Context, t *Task, slot WorkerSlot) {
 	name := slot.Name
+	lastResolveErr := ""
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		var worker *agent.Worker
-		if slot.ProfileID > 0 && e.workerResolve != nil {
-			// A pinned lane resolves its own Worker. On failure the lane idles
-			// and retries; the task keeps running on its other lanes rather
-			// than silently falling back to a different model.
-			resolved, err := e.workerResolve(t, slot)
-			if err != nil {
-				log.Printf("[worker %s] task %s pinned profile #%d unavailable: %v", name, t.ID, slot.ProfileID, err)
-			} else {
-				worker = resolved
-			}
-		} else {
-			_, worker = e.snapshotFor(t)
-		}
-		if worker == nil {
-			if sleepCtx(ctx, 1500*time.Millisecond) {
-				return
-			}
-			continue
-		}
+		// Paused first: a paused task resolves no worker (and logs nothing).
 		if e.IsPaused(t.ID) {
 			if sleepCtx(ctx, 1000*time.Millisecond) {
 				return
 			}
 			continue // user-paused: don't claim/execute intents
+		}
+		worker := e.laneWorker(t, slot, &lastResolveErr)
+		if worker == nil {
+			if sleepCtx(ctx, 1500*time.Millisecond) {
+				return
+			}
+			continue
 		}
 		if e.IsDeleting(t.ID) {
 			return

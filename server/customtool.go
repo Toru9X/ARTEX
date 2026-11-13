@@ -186,9 +186,11 @@ func (s *Server) pgTestCustomTool(w http.ResponseWriter, r *http.Request) {
 const settingPythonInterp = "python_interpreter"
 
 // detectPython finds a python interpreter absolute path (python3 preferred).
+// Windows' WindowsApps python/python3 are Microsoft Store aliases that only
+// print "Python was not found", so they never count.
 func detectPython() string {
 	for _, c := range []string{"python3", "python"} {
-		if p, err := exec.LookPath(c); err == nil {
+		if p, err := exec.LookPath(c); err == nil && !strings.Contains(strings.ToLower(p), `\windowsapps\`) {
 			return p
 		}
 	}

@@ -2,9 +2,12 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 )
 
@@ -177,5 +180,38 @@ func TestWorkerForTaskSlotScopedToTaskChain(t *testing.T) {
 	_, err = s.workerForTaskSlot(&Task{ID: "3"}, WorkerSlot{Name: "work#1", ProfileID: 10})
 	if err != nil && strings.Contains(err.Error(), "not in the task's chain") {
 		t.Fatalf("a task without a chain must not be scope-checked, got %v", err)
+	}
+}
+
+// A lane pinned outside the task's own chain must run on the task's bundle,
+// not idle forever; any other resolve failure idles the lane (nil).
+func TestLaneWorkerFallsBackOutsideChain(t *testing.T) {
+	bundleW, pinnedW := &agent.Worker{}, &agent.Worker{}
+	var resolveErr error
+	e := &Engine{
+		resolve: func(*Task) (*agent.Planner, *agent.Worker) { return &agent.Planner{}, bundleW },
+		workerResolve: func(*Task, WorkerSlot) (*agent.Worker, error) {
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			return pinnedW, nil
+		},
+	}
+	task, last := &Task{ID: "1"}, ""
+	pinned := WorkerSlot{Name: "work#1", ProfileID: 5}
+
+	if w := e.laneWorker(task, pinned, &last); w != pinnedW {
+		t.Fatal("a resolvable pin must use its own worker")
+	}
+	resolveErr = fmt.Errorf("LLM profile #5 is %w", errSlotOutsideChain)
+	if w := e.laneWorker(task, pinned, &last); w != bundleW {
+		t.Fatal("a pin outside the task's chain must fall back to the bundle worker")
+	}
+	resolveErr = errors.New("task 1 has no agent bundle yet")
+	if w := e.laneWorker(task, pinned, &last); w != nil || last == "" {
+		t.Fatalf("other failures must idle the lane and record the error, got w=%v last=%q", w, last)
+	}
+	if w := e.laneWorker(task, WorkerSlot{Name: "work#2"}, &last); w != bundleW {
+		t.Fatal("an unpinned lane uses the bundle worker")
 	}
 }

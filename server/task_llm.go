@@ -646,6 +646,10 @@ func (s *Server) agentBindingProvider(agentKey string) (llm.Provider, agent.Conf
 	return s.poolForBinding(*id, prov, cfg), cfg, true
 }
 
+// errSlotOutsideChain: the lane's pinned profile is not in the task's own LLM
+// chain, so the chain routes that lane (the engine falls back to the bundle).
+var errSlotOutsideChain = errors.New("not in the task's chain")
+
 // workerForTaskSlot builds the Worker for a lane pinned to an LLM profile.
 //
 // Scope rule: a task with its own LLM chain owns its routing, so a slot pin is
@@ -666,7 +670,7 @@ func (s *Server) workerForTaskSlot(t *Task, slot WorkerSlot) (*agent.Worker, err
 				}
 			}
 			if !inChain {
-				return nil, fmt.Errorf("LLM profile #%d is not in the task's chain", slot.ProfileID)
+				return nil, fmt.Errorf("LLM profile #%d is %w", slot.ProfileID, errSlotOutsideChain)
 			}
 		}
 	}
