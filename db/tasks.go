@@ -539,7 +539,7 @@ func (d *DB) SetQueued(id int64, queued bool) error {
 // SetStatus updates a task's lifecycle status. Entering a terminal state
 // (done/failed/timeout) stamps completed_at once (COALESCE keeps the first stamp
 // stable); moving back to a non-terminal state clears it, so a re-run has no stale
-// finish time.
+// finish time (and no stale end_reason).
 func (d *DB) SetStatus(id int64, status string) error {
 	_, err := d.Exec(`
 UPDATE tasks
@@ -548,6 +548,7 @@ UPDATE tasks
        -- eligibility along with the status.
        pause_reason = CASE WHEN $1 IN ('done','failed','timeout') THEN '' ELSE pause_reason END,
        completed_at = CASE WHEN $1 IN ('done','failed','timeout') THEN COALESCE(completed_at, now()) ELSE NULL END,
+       end_reason = CASE WHEN $1 IN ('done','failed','timeout') THEN end_reason ELSE '' END,
        -- A terminal task stops the clock: fold the open segment in and close it.
        active_run_seconds = active_run_seconds + CASE WHEN $1 IN ('done','failed','timeout') AND run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END,
        run_segment_started_at = CASE WHEN $1 IN ('done','failed','timeout') THEN NULL ELSE run_segment_started_at END
@@ -559,20 +560,30 @@ UPDATE tasks
 // terminal, so a completed↔timeout race resolves to the first writer (won=true).
 // Returns won=false (no error) when another terminal status already stuck — the
 // caller then leaves it alone. Non-terminal transitions / re-run still use SetStatus.
-func (d *DB) SetTerminalStatusGuarded(id int64, status string) (won bool, err error) {
+// endReason is stored with the status in the same statement (empty = normal end,
+// EndReasonBudget = run-budget wrap-up); a losing writer stores nothing.
+func (d *DB) SetTerminalStatusGuarded(id int64, status, endReason string) (won bool, err error) {
 	res, err := d.Exec(`
 UPDATE tasks
    SET status = $1,
        pause_reason = '',
        completed_at = COALESCE(completed_at, now()),
+       end_reason = $3,
        active_run_seconds = active_run_seconds + CASE WHEN run_segment_started_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - run_segment_started_at)))::bigint) ELSE 0 END,
        run_segment_started_at = NULL
- WHERE id = $2 AND status NOT IN ('done','failed','timeout')`, status, id)
+ WHERE id = $2 AND status NOT IN ('done','failed','timeout')`, status, id, endReason)
 	if err != nil {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// ClearRunEndReason drops the end_reason of a task that is running again (a
+// revived run). A terminal task keeps its reason.
+func (d *DB) ClearRunEndReason(id int64) error {
+	_, err := d.Exec(`UPDATE tasks SET end_reason='' WHERE id=$1 AND end_reason<>'' AND status NOT IN ('done','failed','timeout')`, id)
+	return err
 }
 
 // StartTaskRunSegment opens the active execution segment. It is idempotent and

@@ -116,6 +116,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     tested: number;
     pct: number | null;
     by_type: { type: string; total: number; tested: number }[];
+    gaps?: { kind: string; surface?: string; risk_area: string }[];
+    completeness?: { complete: boolean; state: string; caveat: string };
   } | null>(null);
   // Intent ids currently re-running ("__all__" means the batch); used to disable buttons + spinners.
   const [rerunning, setRerunning] = React.useState<Set<string>>(new Set());
@@ -692,7 +694,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         </CardContent>
       </Card>
       <TaskInterceptRulesCard taskId={taskId} />
-      {coverage && coverage.enabled && coverage.scope_rows > 0 && (
+      {coverage && coverage.enabled && (coverage.scope_rows > 0 || (coverage.gaps?.length ?? 0) > 0) && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -720,6 +722,22 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                     </span>
                   </span>
                 ))}
+              </div>
+            )}
+            {coverage.completeness && !coverage.completeness.complete && (
+              <p className="text-muted-foreground text-xs">{coverage.completeness.caveat}</p>
+            )}
+            {coverage.gaps && (
+              <div className="text-xs">
+                <span className="font-medium">Coverage gaps: {coverage.gaps.length}</span>
+                <ul className="text-muted-foreground mt-1 list-disc pl-4">
+                  {coverage.gaps.map((g, i) => (
+                    <li key={i}>
+                      {g.kind} {g.surface ? g.surface + " " : ""}
+                      {g.risk_area}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
           </CardContent>

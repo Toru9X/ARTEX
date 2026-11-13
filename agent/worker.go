@@ -510,7 +510,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
-	base := append(tsx.WorkerTools(), w.extraTools...)
+	base := append(tsx.DropCoverageTools(tsx.WorkerTools()), w.extraTools...)
 	// The worker gets no MultiEdit (precise edits use Edit). Glob/Grep stay: models call
 	// them by habit and every "unknown tool" call is a wasted turn; whitebox runs read source with them. The rest of the SDK default tools (Read/Write/Edit/LS/Bash/Sleep)
 	// are kept as usual.
@@ -607,7 +607,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// default (tools need no -x/-k).
 		BashEnv:    append(proxyEnv(w.proxyAddr, w.proxyCACert), credEnv...),
 		WorkingDir: runDir,
-		MaxTurns:   w.maxTurns, // 0 = unlimited (configurable in agent management)
+		MaxTurns:   w.turnCap(ctx), // 0 = unlimited (configurable in agent management); clamped by the intent budget
 		// Wall-clock budget, judged at turn boundaries without interrupting mid-flight;
 		// 0 = unlimited. When a task-level deadline exists, clamp to min(own budget, time
 		// until the deadline) so this run naturally enters wrap-up when the task hits its
