@@ -130,3 +130,16 @@ func TestReportScreenshotTimestampUsesFixedZone(t *testing.T) {
 		t.Fatalf("timestamp = %q, want the UTC+8 report zone", got)
 	}
 }
+
+func TestIsBurpConfigTool(t *testing.T) {
+	for _, n := range []string{"set_proxy_intercept_state", "mcp__Burp__set_user_options", "SET_PROJECT_OPTIONS", "mcp__Burp__set_task_execution_engine_state", "set_active_editor_contents"} {
+		if !isBurpConfigTool(n) {
+			t.Fatalf("%s should be hidden", n)
+		}
+	}
+	for _, n := range []string{"mcp__Burp__send_http1_request", "generate_collaborator_payload", "get_active_editor_contents", "output_user_options"} {
+		if isBurpConfigTool(n) {
+			t.Fatalf("%s should stay visible", n)
+		}
+	}
+}

@@ -137,6 +137,11 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 						(agentKey != "reporter" || !pg.GetBool(settingBrowserScreenshot, false)) {
 						continue
 					}
+					// Burp runs on the operator's desktop: agents may read and send
+					// through it, never change its configuration.
+					if strings.EqualFold(m.Name, burpMCPName) && isBurpConfigTool(t.Name()) {
+						continue
+					}
 					// MCP tools return target-influenced content (browser pages, remote
 					// analyses). Flag it in the description (cached prompt + on-demand
 					// schema) so the model treats their output as data, not instructions.
@@ -229,6 +234,28 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 func isBrowserScreenshotTool(name string) bool {
 	name = strings.ToLower(strings.TrimSpace(name))
 	return strings.Contains(name, "screenshot")
+}
+
+// burpMCPName is the MCP name the skills call (mcp__Burp__*).
+const burpMCPName = "Burp"
+
+// burpConfigTools are the Burp MCP tools that change the operator's running
+// Burp (intercept, options, task engine, editor contents).
+// ponytail: fixed deny list; per-tool visibility if more MCPs need this.
+var burpConfigTools = map[string]bool{
+	"set_proxy_intercept_state":       true,
+	"set_project_options":             true,
+	"set_user_options":                true,
+	"set_task_execution_engine_state": true,
+	"set_active_editor_contents":      true,
+}
+
+// isBurpConfigTool matches with or without the mcp__<server>__ prefix.
+func isBurpConfigTool(name string) bool {
+	if i := strings.LastIndex(name, "__"); i >= 0 {
+		name = name[i+2:]
+	}
+	return burpConfigTools[strings.ToLower(strings.TrimSpace(name))]
 }
 
 func idSet(ids []int64) map[int64]bool {
