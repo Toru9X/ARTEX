@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -42,31 +43,23 @@ func (s *Server) wireInterceptReviewer() {
 				profileID = p.ID
 			}
 		}
-		if profileID == 0 {
-			return intercept.Decision{}, fmt.Errorf("no usable judge model is configured")
-		}
-		profile, err := s.m.pg.ProfileByID(profileID)
-		if err != nil || profile == nil {
-			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("judge model profile %d is unavailable", profileID)
-		}
-		// Jev speaks its own judge protocol, not chat/completions, so it is called
-		// directly here. This has to come before providerForProfile, which refuses
-		// to build a chat provider for a Jev profile.
-		if profile.Format == "jev" {
-			if strings.TrimSpace(profile.APIKey) == "" {
-				return intercept.Decision{ProfileID: profileID}, fmt.Errorf("the Jev judge model has no API key")
+		if profileID != 0 {
+			if profile, err := s.m.pg.ProfileByID(profileID); err == nil && profile != nil && profile.Format == "jev" {
+				if strings.TrimSpace(profile.APIKey) == "" {
+					return intercept.Decision{ProfileID: profileID}, fmt.Errorf("the Jev judge model has no API key")
+				}
+				ctx = llmrec.WithWorker(ctx, judgeWorkerLane)
+				started := time.Now()
+				decision, usage, reviewErr := (jev.Config{
+					BaseURL: profile.BaseURL, APIKey: profile.APIKey, Model: profile.Model, Proxy: profile.Proxy,
+				}).ReviewWithUsage(ctx, input, prompt, s.m.interceptor.GetJudgeConfig().ConfidenceThreshold, profileID)
+				s.recordJevJudgeUsage(ctx, profile, usage, started, reviewErr)
+				return decision, reviewErr
 			}
-			ctx = llmrec.WithWorker(ctx, judgeWorkerLane)
-			started := time.Now()
-			decision, usage, reviewErr := (jev.Config{
-				BaseURL: profile.BaseURL, APIKey: profile.APIKey, Model: profile.Model, Proxy: profile.Proxy,
-			}).ReviewWithUsage(ctx, input, prompt, s.m.interceptor.GetJudgeConfig().ConfidenceThreshold, profileID)
-			s.recordJevJudgeUsage(ctx, profile, usage, started, reviewErr)
-			return decision, reviewErr
 		}
-		prov, _, ok := s.providerForProfile(profileID)
-		if !ok {
-			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("judge model profile %d is unavailable", profileID)
+		prov, profileID, err := s.judgeProvider(profileID)
+		if err != nil {
+			return intercept.Decision{ProfileID: profileID}, err
 		}
 		// Tag this call's usage as the "judge" lane so the config page can report
 		// how much the fallback approval has spent, separate from model profiles.
@@ -81,6 +74,37 @@ func (s *Server) wireInterceptReviewer() {
 		}
 		return intercept.Decision{Action: v.Action, Message: v.Reason, ProfileID: profileID}, nil
 	})
+	// Closed mode: one call answers every question; intercept parses and decides.
+	s.m.interceptor.SetCompleter(func(ctx context.Context, profileID int64, system, user string) (string, int64, error) {
+		prov, profileID, err := s.judgeProvider(profileID)
+		if err != nil {
+			return "", profileID, err
+		}
+		ctx = llmrec.WithWorker(ctx, judgeWorkerLane)
+		text, err := streamCollectText(ctx, prov, system, user, closedJudgeMaxTokens)
+		return text, profileID, err
+	})
+}
+
+// closedJudgeMaxTokens bounds the closed-question reply: eight short answers
+// with one evidence line of at most 200 characters each.
+const closedJudgeMaxTokens = 1536
+
+// judgeProvider resolves the judge profile (0 → active/default) to a provider.
+func (s *Server) judgeProvider(profileID int64) (llm.Provider, int64, error) {
+	if profileID == 0 {
+		if p, err := s.m.pg.ActiveProfile(); err == nil && p != nil {
+			profileID = p.ID
+		}
+	}
+	if profileID == 0 {
+		return nil, 0, fmt.Errorf("no usable judge model is configured")
+	}
+	prov, _, ok := s.providerForProfile(profileID)
+	if !ok {
+		return nil, profileID, fmt.Errorf("judge model profile %d is unavailable", profileID)
+	}
+	return prov, profileID, nil
 }
 
 func reviewCompletion(ctx context.Context, prov llm.Provider, prompt string, input intercept.ReviewInput) (string, error) {
@@ -88,18 +112,18 @@ func reviewCompletion(ctx context.Context, prov llm.Provider, prompt string, inp
 	if err != nil {
 		return "", err
 	}
-	return streamCollectText(ctx, prov, prompt, string(user))
+	return streamCollectText(ctx, prov, prompt, string(user), 1024)
 }
 
 // streamCollectText runs a single non-streaming-style completion (thinking off,
 // low temperature, bounded output) and returns the concatenated text. The
 // budget includes the explanation and complete closing JSON delimiters.
-func streamCollectText(ctx context.Context, prov llm.Provider, system, user string) (string, error) {
+func streamCollectText(ctx context.Context, prov llm.Provider, system, user string, maxTokens int) (string, error) {
 	temp := 0.0
 	req := llm.CompletionRequest{
 		System:      []string{system},
 		Messages:    []llm.Message{llm.UserText(user)},
-		MaxTokens:   1024,
+		MaxTokens:   maxTokens,
 		Temperature: &temp,
 		Thinking:    "disabled",
 	}
@@ -257,6 +281,17 @@ func (s *Server) interceptToggleRule(w http.ResponseWriter, r *http.Request) {
 
 // --- pending (ask) ---
 
+// interceptPendingDTO is a pending row plus its risk score. The embedded row
+// keeps every existing JSON field; the score is computed on read, never stored.
+type interceptPendingDTO struct {
+	db.InterceptPending
+	Risk intercept.RiskReport `json:"risk"`
+}
+
+func pendingDTO(p db.InterceptPending) interceptPendingDTO {
+	return interceptPendingDTO{InterceptPending: p, Risk: intercept.ScoreRisk(p.ToolName, p.ToolInput)}
+}
+
 func (s *Server) interceptListPending(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {
@@ -267,10 +302,11 @@ func (s *Server) interceptListPending(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	if pending == nil {
-		pending = []db.InterceptPending{}
+	out := make([]interceptPendingDTO, 0, len(pending))
+	for _, p := range pending {
+		out = append(out, pendingDTO(p))
 	}
-	writeJSON(w, 200, map[string]any{"pending": pending})
+	writeJSON(w, 200, map[string]any{"pending": out})
 }
 
 func (s *Server) interceptGetOne(w http.ResponseWriter, r *http.Request) {
@@ -292,7 +328,7 @@ func (s *Server) interceptGetOne(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "not found")
 		return
 	}
-	writeJSON(w, 200, p)
+	writeJSON(w, 200, pendingDTO(*p))
 }
 
 func (s *Server) interceptListTaskItems(w http.ResponseWriter, r *http.Request) {
@@ -438,6 +474,125 @@ func (s *Server) interceptDecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// maxBatchDecide bounds one batch decision request.
+const maxBatchDecide = 100
+
+type batchDecideResult struct {
+	ID    int64  `json:"id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// interceptBatchDecide applies one human decision to several pending requests.
+// Each id goes through the same Interceptor.Decide as the single decide route,
+// with the same approver and address: target pins, the decided_by=human audit
+// and the waiter wake-up are identical. One id failing (already decided, empty
+// target pin) is reported for that id and does not stop the others.
+func (s *Server) interceptBatchDecide(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs      []int64 `json:"ids"`
+		Decision string  `json:"decision"` // "allowed" | "denied"
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.Decision != "allowed" && req.Decision != "denied" {
+		writeErr(w, 400, "decision must be allowed or denied")
+		return
+	}
+	if len(req.IDs) == 0 || len(req.IDs) > maxBatchDecide {
+		writeErr(w, 400, fmt.Sprintf("ids must list between 1 and %d pending ids", maxBatchDecide))
+		return
+	}
+	seen := make(map[int64]bool, len(req.IDs))
+	ids := make([]int64, 0, len(req.IDs))
+	for _, id := range req.IDs {
+		if id <= 0 {
+			writeErr(w, 400, fmt.Sprintf("bad pending id %d", id))
+			return
+		}
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	approver, addr := s.approver(r), clientIP(r, s.trustedProxies)
+	results := make([]batchDecideResult, 0, len(ids))
+	decided := 0
+	for _, id := range ids {
+		res := batchDecideResult{ID: id, OK: true}
+		if err := s.m.interceptor.Decide(id, req.Decision == "allowed", approver, addr); err != nil {
+			res.OK, res.Error = false, err.Error()
+		} else {
+			decided++
+		}
+		results = append(results, res)
+	}
+	writeJSON(w, 200, map[string]any{"decided": decided, "failed": len(ids) - decided, "results": results})
+}
+
+// alwaysAllowPriority places "always allow" rules below every default and
+// manual rule, so any deny or ask rule that matches the same call wins.
+const alwaysAllowPriority = -1000
+
+// interceptAlwaysAllow creates an argv allow rule from a pending Bash request.
+// The request body is never read: the command comes from the stored row, so a
+// caller cannot choose what gets allowed. The request itself stays pending.
+func (s *Server) interceptAlwaysAllow(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	id, ok := pathInt(r, "id")
+	if !ok {
+		writeErr(w, 400, "bad pending id")
+		return
+	}
+	p, err := pg.GetInterceptPending(id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if p == nil {
+		writeErr(w, 404, "not found")
+		return
+	}
+	if p.Status != "pending" {
+		writeErr(w, 409, "the request is no longer pending")
+		return
+	}
+	prefix, err := intercept.AlwaysAllowPrefix(p.ToolName, p.ToolInput)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	pattern, _ := json.Marshal(prefix)
+	rules, err := pg.ListInterceptRules()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	for _, rule := range rules {
+		if rule.MatchType != "argv" || rule.Action != "allow" || !rule.Enabled || rule.MatchTarget != "tool_input" {
+			continue
+		}
+		if tokens, err := intercept.ParseArgvPattern(rule.Pattern); err == nil && slices.Equal(tokens, prefix) {
+			writeJSON(w, 200, map[string]any{"rule": rule, "created": false})
+			return
+		}
+	}
+	// Timeout fields take the rule form's defaults.
+	rule, err := pg.CreateInterceptRule("always-allow: "+strings.Join(prefix, " "), "tool_input", "argv", string(pattern),
+		"allow", "", alwaysAllowPriority, true, true, 60, "deny")
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.m.interceptor.Invalidate()
+	writeJSON(w, 200, map[string]any{"rule": rule, "created": true})
 }
 
 // --- target pins (hosts a human approved for one task or one conversation) ---
@@ -645,6 +800,12 @@ func (s *Server) interceptSetJudgeConfig(w http.ResponseWriter, r *http.Request)
 		writeErr(w, 400, "fail_action must be allow, ask or deny")
 		return
 	}
+	switch req.Mode {
+	case "", intercept.JudgeModeClosed, intercept.JudgeModeFreeform:
+	default:
+		writeErr(w, 400, "mode must be closed or freeform")
+		return
+	}
 	switch req.AskTimeoutAction {
 	case "allow", "deny":
 	default:
@@ -718,8 +879,21 @@ func validateInterceptRuleReq(req interceptRuleReq) error {
 	}
 	switch req.MatchType {
 	case "string", "regex":
+	case "argv":
+		if req.MatchTarget != "tool_input" {
+			return fmt.Errorf("an argv rule matches tool_input (the Bash command)")
+		}
+		tokens, err := intercept.ParseArgvPattern(req.Pattern)
+		if err != nil {
+			return fmt.Errorf("invalid argv pattern: %w", err)
+		}
+		if req.Action == "allow" {
+			if err := intercept.CheckArgvAllow(tokens); err != nil {
+				return err
+			}
+		}
 	default:
-		return fmt.Errorf("match_type must be string or regex")
+		return fmt.Errorf("match_type must be string, regex or argv")
 	}
 	if req.Pattern == "" {
 		return fmt.Errorf("pattern cannot be empty")
@@ -756,7 +930,18 @@ func (s *Server) interceptDetail(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "not found")
 		return
 	}
-	writeJSON(w, 200, detail)
+	// The "always allow" button label: the prefix the endpoint would allow,
+	// derived here so the UI never parses the command.
+	out := struct {
+		*db.InterceptDetail
+		AlwaysAllowPrefix string `json:"always_allow_prefix,omitempty"`
+	}{InterceptDetail: detail}
+	if detail.Status == "pending" {
+		if prefix, err := intercept.AlwaysAllowPrefix(detail.ToolName, detail.ToolInput); err == nil {
+			out.AlwaysAllowPrefix = strings.Join(prefix, " ")
+		}
+	}
+	writeJSON(w, 200, out)
 }
 
 // The navigation endpoint returns only the original call and its paired result.

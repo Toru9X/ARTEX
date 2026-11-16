@@ -29,6 +29,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: gofmt
+        run: |
+          files=$(gofmt -l $(git ls-files '*.go'))
+          if [ -n "$files" ]; then echo "gofmt required:"; echo "$files"; exit 1; fi
       - run: go build ./...
       - run: go vet ./...
       # Skipped tests, tracked in issue #9:
@@ -44,9 +48,23 @@ jobs:
         # as rotating failures in the agent package). Serial package execution
         # keeps the database state deterministic.
         run: go test -p 1 ./...
+      - name: online index scripts
+        # Apply and roll back scripts/sql on a database built here from
+        # db/schema.sql and db/migrations. The job-level artextest database
+        # never gets the schema (packages use suffixed databases), and cached
+        # test results mean no test database is guaranteed to exist.
+        env:
+          SQL_DSN: postgres://artex:testpass@localhost:5432/artextest_sqlscripts?sslmode=disable
+        run: |
+          psql "$ARTEX_PG_DSN" -X -v ON_ERROR_STOP=1 -c 'CREATE DATABASE artextest_sqlscripts'
+          psql "$SQL_DSN" -X -q -v ON_ERROR_STOP=1 -f db/schema.sql
+          for f in db/migrations/*.sql; do psql "$SQL_DSN" -X -q -v ON_ERROR_STOP=1 -f "$f"; done
+          psql "$SQL_DSN" -X -v ON_ERROR_STOP=1 -f scripts/sql/20261115-task-query-indexes.sql
+          psql "$SQL_DSN" -X -v ON_ERROR_STOP=1 -f scripts/sql/20261115-task-query-indexes.rollback.sql
       - name: go test -race
-        # Race detector on the packages that pass under -race today. ./server is
-        # left out until it has been checked with -race against postgres.
+        # Race detector on the packages that pass under -race today. ./server
+        # joined once its suite was checked with -race against postgres and its
+        # test teardown fixed (#227, #228).
         # Its own database: the plain run above leaves rows behind and the db tests
         # are not idempotent across runs (duplicate llm_profiles names).
         env:
@@ -54,7 +72,8 @@ jobs:
 
         run: >-
           go test -race -p 1 ./agent ./cmd/artex ./config ./db ./evidence ./guard
-          ./intercept ./llmpool ./llmrec ./mcphttp ./notify ./sidequestion ./traffic
+          ./intercept ./llmpool ./llmrec ./mcphttp ./notify ./server ./sidequestion
+          ./traffic
 
   shell:
     runs-on: ubuntu-latest
@@ -80,4 +99,5 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
+      - run: npm run test:polling
       - run: npm run build:static

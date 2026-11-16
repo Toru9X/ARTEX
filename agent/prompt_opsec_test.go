@@ -16,9 +16,9 @@ func withOpsec(t *testing.T, enabled bool) {
 // withOverride installs a PromptOverride for one test and restores it after.
 func withOverride(t *testing.T, tmpl string) {
 	t.Helper()
-	prev := PromptOverride
-	PromptOverride = func(string) (string, bool) { return tmpl, true }
-	t.Cleanup(func() { PromptOverride = prev })
+	prev := PromptOverride()
+	SetPromptOverride(func(string) (string, bool) { return tmpl, true })
+	t.Cleanup(func() { SetPromptOverride(prev) })
 }
 
 type opsecVars struct{ Now string }
@@ -86,9 +86,9 @@ func TestRenderSystemAppendsOpsecOnEveryPath(t *testing.T) {
 			if tc.override != "" {
 				withOverride(t, tc.override)
 			} else {
-				prev := PromptOverride
-				PromptOverride = nil
-				t.Cleanup(func() { PromptOverride = prev })
+				prev := PromptOverride()
+				SetPromptOverride(nil)
+				t.Cleanup(func() { SetPromptOverride(prev) })
 			}
 			got := renderSystem("worker", tc.def, tc.vars)
 			want := tc.wantBody + "\n\n" + opsecPromptBlock

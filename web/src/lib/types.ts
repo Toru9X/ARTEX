@@ -1027,6 +1027,23 @@ export interface Settings {
   // Render limits of IM messages; 0 = no truncation. The backend answers 400 outside the bounds.
   notify_summary_max_runes?: number; // summary characters per finding, 0-4000, default 120
   notify_assets_max_shown?: number; // asset names listed per finding, 0-50, default 3
+  // Target noise profile; the stored setting wins over ARTEX_NOISE_PROFILE. Applies to the next request.
+  noise_profile?: NoiseProfileName;
+}
+
+export type NoiseProfileName = "off" | "quiet" | "balanced" | "aggressive";
+
+// GET /api/settings/noise: the current profile and its per-host counters (current minute, no reset).
+export interface NoiseStatus {
+  profile: NoiseProfileName;
+  hosts: {
+    host: string;
+    rpm: number;
+    peak_rpm: number;
+    peak_inflight: number;
+    inflight: number;
+    duplicates_avoided: number;
+  }[];
 }
 
 // ---- Vulnerability IM push ----
@@ -1469,7 +1486,8 @@ export interface TaskSchedule {
 // ---- Intercept Rules ----
 export type InterceptAction = "allow" | "deny" | "ask";
 export type InterceptMatchTarget = "tool_name" | "tool_input";
-export type InterceptMatchType = "string" | "regex";
+// argv: pattern is a JSON array of tokens, the prefix of a Bash command (program and subcommands; flags are not constrained).
+export type InterceptMatchType = "string" | "regex" | "argv";
 
 export interface InterceptRule {
   id: number;
@@ -1557,11 +1575,26 @@ export interface InterceptPending {
   reason: string; // the rule's message or the model's verdict reason (model verdicts carry a [model] prefix)
   decided_at?: string;
   created_at: string;
+  // Deterministic risk score, computed by the server when a pending row is read.
+  risk?: InterceptRisk;
+}
+
+export interface InterceptRisk {
+  score: number; // 0..100
+  level: "low" | "medium" | "high";
+  reasons: string[];
+}
+
+export interface InterceptBatchDecideResult {
+  decided: number;
+  failed: number;
+  results: { id: number; ok: boolean; error?: string }[];
 }
 
 // JudgeConfig: global config for model fallback approval (the model decides only when no interception rule matches).
 export interface JudgeConfig {
   enabled: boolean;
+  mode?: "closed" | "freeform"; // closed (default): fixed questions, code decides; freeform: the prompt decides
   profile_id: number; // 0 = follow the active/default profile
   prompt: string; // verdict prompt; on GET the backend backfills the full built-in template when unset
   timeout_seconds: number; // timeout per model call
@@ -1911,6 +1944,7 @@ export interface InterceptAudit {
   rule_name?: string;
   config_digest?: string;
   profile_id?: number;
+  judge_answers?: { id: string; answer: "yes" | "no" | "unknown"; evidence: string }[];
   execution_status: "not_started" | "not_executed" | "awaiting_result" | "succeeded" | "failed" | "unknown";
   output?: string;
   output_truncated?: boolean;
@@ -1918,6 +1952,7 @@ export interface InterceptAudit {
 }
 export interface InterceptDetail extends InterceptApprovalRow {
   audit: InterceptAudit | null;
+  always_allow_prefix?: string; // pending Bash request: the argv prefix "always allow" would allow
 }
 
 export type TrafficEvidenceRole = "baseline" | "proof" | "verification" | "supporting";

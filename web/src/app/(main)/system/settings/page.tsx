@@ -40,6 +40,8 @@ function egressCheckText(check: EgressCheck): string {
   return check.result.probes.at(-1)?.error || check.result.error || "failed";
 }
 
+import { NoiseProfileCard } from "./noise-profile-card";
+
 export default function SystemSettingsPage() {
   const [trafficCapture, setTrafficCapture] = React.useState(false);
   const [agentTrafficBinding, setAgentTrafficBinding] = React.useState(false);
@@ -455,6 +457,8 @@ export default function SystemSettingsPage() {
             />
           </CardContent>
         </Card>
+
+        <NoiseProfileCard />
 
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>

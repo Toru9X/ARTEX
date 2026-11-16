@@ -10,13 +10,14 @@ import (
 
 func TestIntelligenceGateRemovesTokenOverheadAndRejectsLiveWrites(t *testing.T) {
 	oldEnabled, oldRecord := IntelligenceEnabled, IntelligenceRecord
-	oldResolve, oldAugment := ToolResolve, ToolAugment
+	oldResolve, oldAugment := ToolResolve(), ToolAugment()
 	defer func() {
 		IntelligenceEnabled, IntelligenceRecord = oldEnabled, oldRecord
-		ToolResolve, ToolAugment = oldResolve, oldAugment
+		SetToolResolve(oldResolve)
+		SetToolAugment(oldAugment)
 	}()
-	ToolResolve = nil
-	ToolAugment = nil
+	SetToolResolve(nil)
+	SetToolAugment(nil)
 	enabled := false
 	calls := 0
 	IntelligenceEnabled = func() bool { return enabled }

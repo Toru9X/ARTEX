@@ -41,6 +41,9 @@ type ReviewInput struct {
 	Version             int               `json:"version"`
 	WorkingDir          string            `json:"working_directory,omitempty"`
 	Background          *ReviewBackground `json:"background,omitempty"`
+	// OperatorPolicy is set in closed mode only: the operator's custom judge
+	// prompt, carried as bounded data for the operator_policy question.
+	OperatorPolicy      *ReviewPolicy     `json:"operator_policy,omitempty"`
 	ScriptCaptureStatus string            `json:"script_capture_status,omitempty"`
 	Scripts             []ReviewScript    `json:"script_files,omitempty"`
 	Tool                string            `json:"tool_name"`

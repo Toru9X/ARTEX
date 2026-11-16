@@ -52,6 +52,7 @@ import { OverviewTab } from "./_tabs/overview-tab";
 import { ReportTab } from "./_tabs/report-tab";
 import { RetestsTab } from "./_tabs/retests-tab";
 import { SessionsTab } from "./_tabs/sessions-tab";
+import { setVisibleInterval } from "@/lib/polling";
 
 const TABS = [
   { value: "sessions", label: "Sessions" },
@@ -227,14 +228,24 @@ function TaskDetailInner() {
       .catch(() => setProfiles([]));
   }, []);
 
-  usePoll(
-    async (signal) => {
-      const rows = await api.interceptTask(id);
-      if (!signal.aborted) setInterceptPendingCount(rows.filter((r) => r.status === "pending").length);
-    },
-    5000,
-    { resetKey: id },
-  );
+  React.useEffect(() => {
+    let alive = true;
+    const load = () =>
+      api
+        .interceptTask(id)
+        .then((rows) => {
+          if (alive) setInterceptPendingCount(rows.filter((r) => r.status === "pending").length);
+        })
+        .catch(() => {
+          // Polling is best-effort; the next interval retries automatically.
+        });
+    void load();
+    const stopPolling = setVisibleInterval(load, 5000);
+    return () => {
+      alive = false;
+      stopPolling();
+    };
+  }, [id]);
 
   const taskLoadInFlight = React.useRef<string | null>(null);
   const load = React.useCallback(() => {
@@ -265,10 +276,11 @@ function TaskDetailInner() {
         }
       });
   }, [id]);
-  // The header's own cadence. It used to run beside each tab's separate timer, so
-  // the counts up here and the list below could disagree for a few seconds; both
-  // now pause together while the tab is hidden and refresh together on return.
-  usePoll(() => load(), 5000, { resetKey: id });
+  React.useEffect(() => {
+    load();
+    const stopPolling = setVisibleInterval(load, 5000);
+    return stopPolling;
+  }, [load]);
 
   async function togglePause() {
     if (task && ["done", "failed", "timeout"].includes(task.status)) return;

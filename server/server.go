@@ -22,6 +22,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/intercept/jev"
 	"github.com/Autumn-27/artex/llmpool"
@@ -235,7 +236,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// Read per render so toggling the switch takes effect on the next agent
 		// round, without rebuilding any agent.
 		agent.OpsecEnabled = m.OpsecEnabled
-		agent.PromptOverride = func(key string) (string, bool) {
+		agent.SetPromptOverride(func(key string) (string, bool) {
 			a, err := m.pg.GetAgentByKey(key)
 			if err != nil || a == nil {
 				return "", false
@@ -245,38 +246,38 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 				return "", false
 			}
 			return t, true
-		}
+		})
 		// Wire DB-stored wrap-up (settlement) prompts. Empty column → built-in default.
-		agent.WrapupOverride = func(key string) (string, bool) {
+		agent.SetWrapupOverride(func(key string) (string, bool) {
 			a, err := m.pg.GetAgentByKey(key)
 			if err != nil || a == nil || a.WrapupPrompt == "" {
 				return "", false
 			}
 			return a.WrapupPrompt, true
-		}
+		})
 		// Wire DB-stored wrap-up turn budgets. 0 / missing → built-in per-agent default.
-		agent.WrapupMaxTurnsOverride = func(key string) (int, bool) {
+		agent.SetWrapupMaxTurnsOverride(func(key string) (int, bool) {
 			a, err := m.pg.GetAgentByKey(key)
 			if err != nil || a == nil || a.WrapupMaxTurns <= 0 {
 				return 0, false
 			}
 			return a.WrapupMaxTurns, true
-		}
+		})
 		// Wire DB-stored TASK-TIMEOUT wrap-up prompt/turns (worker/planner). Empty/0 → default.
-		agent.WrapupTaskTimeoutOverride = func(key string) (string, bool) {
+		agent.SetWrapupTaskTimeoutOverride(func(key string) (string, bool) {
 			a, err := m.pg.GetAgentByKey(key)
 			if err != nil || a == nil || a.TaskTimeoutWrapupPrompt == "" {
 				return "", false
 			}
 			return a.TaskTimeoutWrapupPrompt, true
-		}
-		agent.WrapupTaskTimeoutTurnsOverride = func(key string) (int, bool) {
+		})
+		agent.SetWrapupTaskTimeoutTurnsOverride(func(key string) (int, bool) {
 			a, err := m.pg.GetAgentByKey(key)
 			if err != nil || a == nil || a.TaskTimeoutWrapupMaxTurns <= 0 {
 				return 0, false
 			}
 			return a.TaskTimeoutWrapupMaxTurns, true
-		}
+		})
 		wireAgentAugment(m.pg, s.skillDir, s.hostTools) // wire visible skills/MCP + traffic/orchestration host tools into the agent toolset
 		domainReg := buildDomainReg(m.Assets())
 		wireTools(m.pg, domainReg)   // built-in tools table: filter per agent + override description/schema + inject defaults
@@ -913,6 +914,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
+	mux.HandleFunc("GET /api/settings/noise", s.noiseStatus) // current noise profile + per-host counters (no reset)
 	// Vulnerability IM push. Channels are "multi-instance + per-instance filter rules" resources, so they get their own group of
 	// REST endpoints instead of being stuffed into the flat /api/settings key-value store.
 	mux.HandleFunc("GET /api/notify/meta", s.notifyMeta)
@@ -1076,6 +1078,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/intercept/pending", s.interceptListPending)
 	mux.HandleFunc("GET /api/intercept/pending/{id}", s.interceptGetOne)
 	mux.HandleFunc("POST /api/intercept/pending/{id}/decide", s.interceptDecide)
+	mux.HandleFunc("POST /api/intercept/pending/batch-decide", s.interceptBatchDecide)
+	mux.HandleFunc("POST /api/intercept/pending/{id}/always-allow", s.interceptAlwaysAllow) // creates an argv allow rule; the request stays pending
 	mux.HandleFunc("GET /api/intercept/history", s.interceptHistory)
 	mux.HandleFunc("GET /api/intercept/history/{id}", s.interceptDetail)
 	mux.HandleFunc("GET /api/intercept/history/{id}/execution", s.interceptExecution)
@@ -1477,7 +1481,8 @@ func (s *Server) getLLM(w http.ResponseWriter, r *http.Request) {
 		"provider":         s.llmCfg.Provider(),
 		"model":            s.llmCfg.Model,
 		"base_url":         s.llmCfg.BaseURL,
-		"proxy":            s.llmCfg.Proxy,
+		"proxy":            maskedSecret(s.llmCfg.Proxy),
+		"proxy_set":        s.llmCfg.Proxy != "",
 		"key_set":          s.llmCfg.APIKey != "",
 		"rate_per_second":  s.llmCfg.RatePerSecond,
 		"rate_per_minute":  s.llmCfg.RatePerMinute,
@@ -1504,6 +1509,11 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if isMaskedSecret(req.Proxy) { // getLLM returns the proxy masked: keep the current one
+		s.cfgMu.Lock()
+		req.Proxy = s.llmCfg.Proxy
+		s.cfgMu.Unlock()
 	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
 	cfg.RatePerSecond, cfg.RatePerMinute = req.RatePerSecond, req.RatePerMinute
@@ -1575,6 +1585,14 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	if req.ProfileID != nil {
 		if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
 			stored = p
+		}
+	}
+	if isMaskedSecret(req.Proxy) { // the form echoes the masked proxy: test with the stored one
+		req.Proxy = ""
+		if stored == nil {
+			s.cfgMu.Lock()
+			req.Proxy = s.llmCfg.Proxy
+			s.cfgMu.Unlock()
 		}
 	}
 	if stored != nil {
@@ -2076,11 +2094,11 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dto := taskDTO(t, s.resolvedTaskStatus(t))
-	metrics, err := s.m.PG().TaskListMetricsAll()
+	metrics, err := s.m.PG().TaskListMetrics(t.ExpID)
 	if err != nil {
 		log.Printf("[tasks] detail metrics query failed for %s — metrics zeroed: %v", t.ID, err)
 	}
-	s.applyTaskMetrics(&dto, t, metrics[t.ExpID])
+	s.applyTaskMetrics(&dto, t, metrics)
 	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
 	applyTaskArchiveBlocker(&dto, archiveBlockers)
 	writeJSON(w, 200, dto)
@@ -3690,20 +3708,22 @@ func (s *Server) settingsPayload() map[string]any {
 	}
 	limits := notifyLimits(s.m.pg)
 	return map[string]any{
-		"traffic_capture":       s.m.TrafficEnabled(),
-		"agent_traffic_binding": s.m.pg.GetBool(settingAgentTrafficBinding, false),
-		"llm_record":            s.m.LLMRecordEnabled(),
-		"web_search_enabled":    on,
-		"web_search_backend":    backend,
-		"brave_key_set":         strings.TrimSpace(braveKey) != "",
-		"tavily_key_set":        strings.TrimSpace(tavilyKey) != "",
+		"traffic_capture":          s.m.TrafficEnabled(),
+		"agent_traffic_binding":    s.m.pg.GetBool(settingAgentTrafficBinding, false),
+		"llm_record":               s.m.LLMRecordEnabled(),
+		"web_search_enabled":       on,
+		"web_search_backend":       backend,
+		"brave_key_set":            strings.TrimSpace(braveKey) != "",
+		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
 		// Dedicated DeepSeek search credentials; empty means the backend borrows
 		// the active LLM profile. The key itself is never returned.
 		"deepseek_search_key_set":  dsKey != "",
 		"deepseek_search_base_url": dsBase,
 		"deepseek_search_model":    dsModel,
-		"web_search_proxy":         proxy,                       // dedicated egress proxy (http/https/socks5), empty = direct
-		"global_proxy":             s.m.GlobalProxy(),           // global egress proxy (http/https/socks5), all target traffic goes through it, empty = direct
+		"web_search_proxy":         maskedSecret(proxy),             // dedicated egress proxy (http/https/socks5), empty = direct
+		"web_search_proxy_set":     proxy != "",
+		"global_proxy":             maskedSecret(s.m.GlobalProxy()), // global egress proxy (http/https/socks5), all target traffic goes through it, empty = direct
+		"global_proxy_set":         s.m.GlobalProxy() != "",
 		"python_interpreter":       strings.TrimSpace(pyStored), // user/auto-set value (empty = use runtime detection)
 		"workers":                  s.m.Workers(),               // number of concurrent worker agents (default 3); applies to tasks started afterwards
 		"task_concurrency_enabled": concOn,                      // task concurrency cap switch (default off)
@@ -3767,6 +3787,8 @@ func (s *Server) settingsPayload() map[string]any {
 		// Render limits of IM messages; 0 = no truncation.
 		"notify_summary_max_runes": limits.SummaryRunes,
 		"notify_assets_max_shown":  limits.AssetsShown,
+		// Effective target noise profile (off by default): the stored setting, else ARTEX_NOISE_PROFILE.
+		"noise_profile": egress.CurrentProfile().Name,
 	}
 }
 
@@ -3875,11 +3897,30 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		// Render limits of IM messages: summary characters (0-4000) and asset names listed (0-50); 0 = no truncation.
 		NotifySummaryMaxRunes *int `json:"notify_summary_max_runes"`
 		NotifyAssetsMaxShown  *int `json:"notify_assets_max_shown"`
+		// Target noise profile: off|quiet|balanced|aggressive; null = unchanged. Applies to the next request, no agent rebuild.
+		NoiseProfile *string `json:"noise_profile"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// Validated before any other field is written, so a bad value changes nothing.
+	var noise egress.Profile
+	if req.NoiseProfile != nil {
+		var ok bool
+		if noise, ok = egress.ProfileByName(*req.NoiseProfile); !ok {
+			writeErr(w, 400, "noise_profile must be off, quiet, balanced or aggressive")
+			return
+		}
+		if err := s.m.pg.SetSetting(settingNoiseProfile, noise.Name); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		egress.SetProfile(noise)
+	}
+	// A masked placeholder echoed back keeps the stored secret, like null.
+	req.BraveKey, req.TavilyKey = keepIfMasked(req.BraveKey), keepIfMasked(req.TavilyKey)
+	req.WebSearchProxy, req.GlobalProxy = keepIfMasked(req.WebSearchProxy), keepIfMasked(req.GlobalProxy)
 	if req.ConstraintsInjectPlanner != nil {
 		if err := s.m.pg.SetBool(settingConstraintsInjectPlanner, *req.ConstraintsInjectPlanner); err != nil {
 			writeErr(w, 500, err.Error())
@@ -4210,13 +4251,17 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	_, backend, storedBraveKey, storedTavilyKey, _ := s.m.WebSearch()
+	_, backend, storedBraveKey, storedTavilyKey, storedProxy := s.m.WebSearch()
 	if strings.TrimSpace(req.Backend) != "" {
 		backend = req.Backend
 	}
 	// Proxy is taken from the form as-is (empty = direct), so testing reflects exactly
 	// what's shown — including an intentional "clear proxy to test direct" before saving.
+	// The masked placeholder the form shows for a saved proxy means the saved one.
 	proxy := strings.TrimSpace(req.Proxy)
+	if isMaskedSecret(proxy) {
+		proxy = storedProxy
+	}
 	// API keys are secrets the form omits when already saved, so fall back to stored.
 	braveKey := storedBraveKey
 	if strings.TrimSpace(req.BraveKey) != "" {

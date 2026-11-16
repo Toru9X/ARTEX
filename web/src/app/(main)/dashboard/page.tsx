@@ -45,6 +45,7 @@ import type {
   UsageStats,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { setVisibleInterval } from "@/lib/polling";
 
 // ── chart constants ───────────────────────────────────────────────────────────
 
@@ -201,69 +202,129 @@ export default function DashboardPage() {
   // steady cadence is what makes the reading meaningful. While the tab is hidden
   // nothing is asked for, and the first reading afterwards averages the gap —
   // the server keeps the counter, so the number stays correct, just coarser.
-  usePoll(async (signal) => {
-    const next = await api.systemMetrics();
-    if (!signal.aborted) setSystemMetrics(next);
-  }, 5000);
+  React.useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const next = await api.systemMetrics();
+        if (alive) setSystemMetrics(next);
+      } catch {
+        /* transient errors */
+      }
+    };
+    void load();
+    const stopPolling = setVisibleInterval(load, 5000);
+    return () => {
+      alive = false;
+      stopPolling();
+    };
+  }, []);
 
   // The task list is the most expensive dashboard source. Poll it independently
-  // so a large history cannot hold back every other dashboard panel. The
-  // signature lives in a ref because it has to survive across ticks, which a
-  // local would not now that the callback is rebuilt on every render.
-  const tasksSignature = React.useRef("");
-  usePoll(async (signal) => {
-    const tr = await api.tasks();
-    if (signal.aborted) return;
-    const nextSignature = JSON.stringify(tr.tasks);
-    if (nextSignature !== tasksSignature.current) {
-      tasksSignature.current = nextSignature;
-      setTasks(tr.tasks);
-    }
-  }, 5000);
+  // so a large history cannot hold back every other dashboard panel.
+  React.useEffect(() => {
+    let alive = true;
+    let loading = false;
+    let signature = "";
+    const load = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const tr = await api.tasks();
+        if (!alive) return;
+        const nextSignature = JSON.stringify(tr.tasks);
+        if (nextSignature !== signature) {
+          signature = nextSignature;
+          setTasks(tr.tasks);
+        }
+      } catch {
+        /* transient errors — next poll retries */
+      } finally {
+        loading = false;
+      }
+    };
+    void load();
+    const stopPolling = setVisibleInterval(load, 5000);
+    return () => {
+      alive = false;
+      stopPolling();
+    };
+  }, []);
 
   // The remaining fast sources stay batched so one poll causes a single render.
-  usePoll(async (signal) => {
-    const [findings, stats, settings, pending, activity, tokens, conversationTokens] = await Promise.all([
-      api.findings(),
-      api.stats(),
-      api.settings(),
-      api.interceptPending(),
-      api.activity(undefined, { limit: 30 }),
-      api.tokenStats(),
-      api.conversationTokens(),
-    ]);
-    if (signal.aborted) return;
-    setFindings(findings);
-    setStats(stats);
-    setSettings(settings);
-    setPending(pending);
-    setActivity(activity.items);
-    setTokens(tokens.total ?? null);
-    setConvTokens(conversationTokens);
-  }, 5000);
+  React.useEffect(() => {
+    let alive = true;
+    let loading = false;
+    const load = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const [findings, stats, settings, pending, activity, tokens, conversationTokens] = await Promise.all([
+          api.findings(),
+          api.stats(),
+          api.settings(),
+          api.interceptPending(),
+          api.activity(undefined, { limit: 30 }),
+          api.tokenStats(),
+          api.conversationTokens(),
+        ]);
+        if (!alive) return;
+        setFindings(findings);
+        setStats(stats);
+        setSettings(settings);
+        setPending(pending);
+        setActivity(activity.items);
+        setTokens(tokens.total ?? null);
+        setConvTokens(conversationTokens);
+      } catch {
+        // Preserve stale data and retry on the next interval.
+      } finally {
+        loading = false;
+      }
+    };
+    void load();
+    const stopPolling = setVisibleInterval(load, 5000);
+    return () => {
+      alive = false;
+      stopPolling();
+    };
+  }, []);
 
   // slow poll: traffic, assets, system-static (every 15s)
-  usePoll(async (signal) => {
-    const [traf, counts, agentList, mcpList, skillList, toolList, profileList, usage] = await Promise.all([
-      api.traffic(0, 50),
-      api.assetCounts(),
-      api.agents(),
-      api.mcpServers(),
-      api.skills(),
-      api.tools(),
-      api.llmProfiles(),
-      api.usageStats(365),
-    ]);
-    if (signal.aborted) return;
-    setTraffic(traf.exchanges ?? []);
-    setAssetCounts(counts ?? {});
-    setAgents(agentList);
-    setMcpServers(mcpList);
-    setSkills(skillList);
-    setTools(toolList);
-    setLLMProfiles(profileList);
-    setUsageStats(usage);
-  }, 15000);
+  React.useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const [traf, counts, agentList, mcpList, skillList, toolList, profileList, usage] = await Promise.all([
+          api.traffic(0, 50),
+          api.assetCounts(),
+          api.agents(),
+          api.mcpServers(),
+          api.skills(),
+          api.tools(),
+          api.llmProfiles(),
+          api.usageStats(365),
+        ]);
+        if (!alive) return;
+        setTraffic(traf.exchanges ?? []);
+        setAssetCounts(counts ?? {});
+        setAgents(agentList);
+        setMcpServers(mcpList);
+        setSkills(skillList);
+        setTools(toolList);
+        setLLMProfiles(profileList);
+        setUsageStats(usage);
+      } catch {
+        /* transient errors */
+      }
+    };
+    void load();
+    const stopPolling = setVisibleInterval(load, 15000);
+    return () => {
+      alive = false;
+      stopPolling();
+    };
+  }, []);
 
   // ── derived ───────────────────────────────────────────────────────────────
 

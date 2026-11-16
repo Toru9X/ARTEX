@@ -49,7 +49,6 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { usePoll } from "@/hooks/use-poll";
 import { useSideQuestions } from "@/hooks/use-side-questions";
 import { api, sseUrl } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
@@ -70,6 +69,7 @@ import type {
   TokenTotal,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { setVisibleInterval } from "@/lib/polling";
 
 // resolutionLabel names the LLM a session runs on. The badge shows this alone and
 // keeps the model id in its tooltip. Env-backed configs can arrive without a name,
@@ -781,56 +781,94 @@ export function SessionsTab({ taskId, taskPaused = false }: { taskId: string; ta
   );
 
   // ── task token total (whole task, all agents) ───────────────────────────────────
-  usePoll(
-    async (signal) => {
-      const r = await api.tokenStats(taskId);
-      if (signal.aborted) return;
-      setTaskTokens(r.total);
-      setSessionTokens(Object.fromEntries(r.sessions.map((item) => [item.session, item])));
-    },
-    5000,
-    { resetKey: taskId },
-  );
+  React.useEffect(() => {
+    let alive = true;
+    const load = () =>
+      api
+        .tokenStats(taskId)
+        .then((r) => {
+          if (!alive) return;
+          setTaskTokens(r.total);
+          setSessionTokens(Object.fromEntries(r.sessions.map((item) => [item.session, item])));
+        })
+        .catch(() => {
+          // Polling is best-effort; the next interval retries automatically.
+        });
+    void load();
+    const stopPolling = setVisibleInterval(load, 5000);
+    return () => {
+      alive = false;
+      stopPolling();
+    };
+  }, [taskId]);
 
-  // Switching task must drop the previous task's answer before the first reply arrives.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: taskId is the trigger, not a value read here
-  React.useEffect(() => setMainChatRunning(null), [taskId]);
-
-  usePoll(
-    async (signal) => {
-      // Sending a message bumps chatStatusRequestRef to invalidate a reply that is
-      // already in flight, which an abort signal alone would not cover.
+  React.useEffect(() => {
+    let alive = true;
+    setMainChatRunning(null);
+    const load = () => {
       const request = ++chatStatusRequestRef.current;
-      const { running } = await api.chatStatus(taskId);
-      if (!signal.aborted && chatStatusRequestRef.current === request) setMainChatRunning(running);
-    },
-    2000,
-    { resetKey: taskId },
-  );
+      return api
+        .chatStatus(taskId)
+        .then(({ running }) => {
+          if (alive && chatStatusRequestRef.current === request) setMainChatRunning(running);
+        })
+        .catch(() => {
+          // Keep the last authoritative value. Before the first success, recent
+          // activity remains a conservative fallback.
+        });
+    };
+    void load();
+    const stopPolling = setVisibleInterval(load, 2000);
+    return () => {
+      alive = false;
+      stopPolling();
+    };
+  }, [taskId]);
 
-  usePoll(
-    async (signal) => {
-      const value = await api.taskLLMResolution(taskId);
-      if (!signal.aborted) setLLMResolutions(value);
-    },
-    10_000,
-    { resetKey: taskId },
-  );
+  React.useEffect(() => {
+    let alive = true;
+    const load = () =>
+      api
+        .taskLLMResolution(taskId)
+        .then((value) => {
+          if (alive) setLLMResolutions(value);
+        })
+        .catch(() => {
+          // Polling is best-effort; the next interval retries automatically.
+        });
+    void load();
+    const stopPolling = setVisibleInterval(load, 10_000);
+    return () => {
+      alive = false;
+      stopPolling();
+    };
+  }, [taskId]);
 
-  usePoll(
-    async (signal) => {
-      const rows = await api.interceptTask(taskId);
-      if (!signal.aborted) setPendingIntercepts(rows.filter((r) => r.status === "pending"));
-    },
-    5000,
-    { resetKey: taskId },
-  );
+  React.useEffect(() => {
+    let alive = true;
+    const load = () =>
+      api
+        .interceptTask(taskId)
+        .then((rows) => {
+          if (alive) setPendingIntercepts(rows.filter((r) => r.status === "pending"));
+        })
+        .catch(() => {
+          // Polling is best-effort; the next interval retries automatically.
+        });
+    void load();
+    const stopPolling = setVisibleInterval(load, 5000);
+    return () => {
+      alive = false;
+      stopPolling();
+    };
+  }, [taskId]);
 
   // Re-render on a timer so "streaming" liveness recomputes as activity goes stale.
-  // Nothing is stale while the tab is hidden and nobody is reading it, so this rides
-  // the same visibility gate as the fetches.
   const [, setTick] = React.useState(0);
-  usePoll(() => setTick((t) => t + 1), 1500, { leading: false });
+  React.useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1500);
+    return () => clearInterval(id);
+  }, []);
 
   // ── first load + single task SSE ────────────────────────────────────────────────
   // On task open: load Main's latest page, take the task-level snapshot cursor from
@@ -1010,51 +1048,64 @@ export function SessionsTab({ taskId, taskPaused = false }: { taskId: string; ta
     };
   }, [taskId, patchStore]);
 
-  usePoll(
-    async (signal) => {
-      const assets = await api.taskIntentAssets(taskId);
-      // The next poll retries; Worker controls and transcripts remain available.
-      if (!signal.aborted) setIntentAssets(assets);
-    },
-    5000,
-    { resetKey: taskId },
-  );
+  React.useEffect(() => {
+    let active = true;
+    const load = () =>
+      api
+        .taskIntentAssets(taskId)
+        .then((assets) => {
+          if (active) setIntentAssets(assets);
+        })
+        .catch(() => {
+          // The next poll retries; Worker controls and transcripts remain available.
+        });
+    void load();
+    const stopPolling = setVisibleInterval(load, 5000);
+    return () => {
+      active = false;
+      stopPolling();
+    };
+  }, [taskId]);
 
   // ── worker (intent) session list — paged, poll first page lightly ───────────────
-  // Clearing runs in its own effect, declared before the poll so the lists are empty
-  // before the new task's first request lands.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: taskId is the trigger, not a value read here
   React.useEffect(() => {
+    let active = true;
     firstIntentsRef.current = [];
     setIntents([]);
     setOlderIntents([]);
     setFirstIntentsHasMore(false);
     setOlderIntentsHasMore(false);
-  }, [taskId]);
-
-  usePoll(
-    async (signal) => {
-      const r = await api.intentsPage(taskId, 0, 300);
-      if (signal.aborted) return;
-      const freshIds = new Set(r.items.map((item) => item.id));
-      const oldestFreshId = r.items.reduce((minimum, item) => Math.min(minimum, Number(item.id)), Infinity);
-      const displaced = r.hasMore
-        ? firstIntentsRef.current.filter((item) => !freshIds.has(item.id) && Number(item.id) < oldestFreshId)
-        : [];
-      if (displaced.length > 0) {
-        setOlderIntents((previous) => {
-          const byId = new Map(previous.map((item) => [item.id, item]));
-          for (const item of displaced) byId.set(item.id, item);
-          return [...byId.values()];
+    const load = () =>
+      api
+        .intentsPage(taskId, 0, 300)
+        .then((r) => {
+          if (!active) return;
+          const freshIds = new Set(r.items.map((item) => item.id));
+          const oldestFreshId = r.items.reduce((minimum, item) => Math.min(minimum, Number(item.id)), Infinity);
+          const displaced = r.hasMore
+            ? firstIntentsRef.current.filter((item) => !freshIds.has(item.id) && Number(item.id) < oldestFreshId)
+            : [];
+          if (displaced.length > 0) {
+            setOlderIntents((previous) => {
+              const byId = new Map(previous.map((item) => [item.id, item]));
+              for (const item of displaced) byId.set(item.id, item);
+              return [...byId.values()];
+            });
+          }
+          firstIntentsRef.current = r.items;
+          setIntents(r.items);
+          setFirstIntentsHasMore(r.hasMore);
+        })
+        .catch(() => {
+          // Polling is best-effort; the next interval retries automatically.
         });
-      }
-      firstIntentsRef.current = r.items;
-      setIntents(r.items);
-      setFirstIntentsHasMore(r.hasMore);
-    },
-    5000,
-    { resetKey: taskId },
-  );
+    void load();
+    const stopPolling = setVisibleInterval(load, 5000);
+    return () => {
+      active = false;
+      stopPolling();
+    };
+  }, [taskId]);
 
   const loadOlderIntents = React.useCallback(() => {
     if (loadingOlderIntents) return;

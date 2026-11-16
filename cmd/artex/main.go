@@ -1,4 +1,4 @@
-// Command artex runs the ARTEX backend: the dual SQLite graph stores,
+// Command artex runs the ARTEX backend: the dual PostgreSQL graph stores,
 // the event-driven exploration engine, and the JSON HTTP API consumed by the
 // shadcn/ui frontend.
 package main
@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
@@ -51,7 +50,7 @@ func main() {
 func run() int {
 	var (
 		addr    = flag.String("addr", "127.0.0.1:8787", "HTTP listen address")
-		dataDir = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")
+		dataDir = flag.String("data", filepath.Join(config.BaseDir(), "data"), "runtime data directory: traffic index, task files, transcripts (default: data/ next to the executable)")
 		proxy   = flag.String("proxy", "127.0.0.1:8788", "traffic recording proxy address (empty to disable)")
 	)
 	flag.Parse()
@@ -98,15 +97,8 @@ func run() int {
 		skillDir = abs
 	}
 	log.Printf("[config] skill directory: %s", skillDir)
-	// JWT signing key directory: ARTEX_JWT_KEY_DIR (the Docker image points it at
-	// the /app/keys volume) or the base dir. Never the browsable data dir.
-	keyDir := strings.TrimSpace(os.Getenv("ARTEX_JWT_KEY_DIR"))
-	if keyDir == "" {
-		keyDir = config.BaseDir()
-	}
-	if abs, err := filepath.Abs(keyDir); err == nil {
-		keyDir = abs
-	}
+	// JWT signing key directory (also holds secret.key, see server.NewManager).
+	keyDir := config.KeyDir()
 	log.Printf("[config] JWT key directory: %s", keyDir)
 	// Proxies whose X-Forwarded-For the login rate limit reads; empty trusts none.
 	trusted, err := server.ParseTrustedProxies(os.Getenv("ARTEX_TRUSTED_PROXIES"))

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
@@ -212,9 +213,18 @@ func (w *Worker) SetWebSearch(o WebSearchOpts) { w.webSearch = o }
 // honor the proxy vars. ALL_PROXY is set too so a socks5 egress proxy (which curl
 // only reads from ALL_PROXY, not HTTP(S)_PROXY) works in the capture-off path.
 // Empty proxyAddr → nil (direct, unchanged env).
+//
+// With a MITM CA (capture on) the proxy URL carries the pace marker userinfo
+// (egress.MarkProxyURL): the recording proxy then paces this connection's
+// requests by the noise profile. Only Bash gets the marker; WebFetch, the http
+// custom tools and enrich keep the plain URL, since egress paces them already.
+// The global proxy (capture off) is left as configured.
 func proxyEnv(proxyAddr, caCert string) []string {
 	if proxyAddr == "" {
 		return nil
+	}
+	if caCert != "" {
+		proxyAddr = egress.MarkProxyURL(proxyAddr)
 	}
 	env := []string{
 		"HTTP_PROXY=" + proxyAddr, "HTTPS_PROXY=" + proxyAddr,
@@ -325,7 +335,7 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	// caCert is present only when the recording MITM is on, which is exactly when
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
 	// Optional finding guidance is added for every role after tool resolution.
-	return body + untrustedContentTail(body) + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
+	return body + untrustedContentTail(body) + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir) + noiseProfileBlock()
 }
 
 // renderIntentTask formats the claimed intent for the worker's launch USER message:
@@ -634,9 +644,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks
 	}
+	// The session id is the provider-side identity (session header, usage metering)
+	// with or without persistence; Norma only puts it on ctx when it writes a transcript.
+	opts.SessionID = WorkerSessionID(ts.ID(), intent.ID)
+	ctx = transcript.WithSessionID(ctx, opts.SessionID)
 	if w.tx != nil { // persist raw LLM conversation; one file per worked intent
 		opts.Transcript = w.tx
-		opts.SessionID = WorkerSessionID(ts.ID(), intent.ID)
 	}
 	intentID := intent.ID
 	emitWrap := func(r db.Activity) {
@@ -668,7 +681,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// restarting from scratch.
 	alreadyRecorded := false
 	if w.tx != nil {
-		_ = s.Resume(opts.SessionID)
+		// A corrupt or unreadable transcript stops the run before any model or tool
+		// call. No terminal reason: the engine marks the intent blocked without the
+		// model_error reruns, which would only fail the same way again.
+		if err := resumeSession(s, opts.SessionID); err != nil {
+			return "", tsx.Writes(), err
+		}
 		alreadyRecorded = requestID != "" && hasWorkerChatMessage(s.Messages(), requestID)
 		if len(s.Messages()) > 0 && message == "" {
 			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)

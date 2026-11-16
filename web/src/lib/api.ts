@@ -961,6 +961,7 @@ export const api = {
     put<{ enabled: boolean; username: string; password_set: boolean }>("/settings/basic-auth", settings),
   settings: () => get<Settings>(`/settings`),
   setSettings: (patch: Partial<Settings>) => put<Settings>(`/settings`, patch),
+  noiseStatus: () => get<import("@/lib/types").NoiseStatus>(`/settings/noise`),
   // Run a real "test" search with the given (or saved) config to verify it works.
   testWebSearch: (patch: {
     web_search_backend?: string;
@@ -1296,7 +1297,7 @@ export const api = {
     t: Pick<Tool, "description" | "schema" | "agents" | "enabled" | "kind" | "exec" | "deferred">,
   ) => put<{ ok: boolean }>(`/tools/custom/${key}`, t),
   deleteCustomTool: (key: string) => del<{ deleted: string }>(`/tools/custom/${key}`),
-  testCustomTool: (body: { kind: string; exec: Record<string, unknown>; params: Record<string, unknown> }) =>
+  testCustomTool: (body: { key?: string; kind: string; exec: Record<string, unknown>; params: Record<string, unknown> }) =>
     post<{ output: string; is_error: boolean }>("/tools/custom/test", body),
   detectPython: () => post<{ python_interpreter: string }>("/settings/python/detect", {}),
 
@@ -1415,6 +1416,12 @@ export const api = {
   interceptGetOne: (id: number) => get<InterceptPending>(`/intercept/pending/${id}`),
   interceptDecide: (id: number, decision: "allowed" | "denied") =>
     post<{ ok: boolean }>(`/intercept/pending/${id}/decide`, { decision }),
+  // 200 even on partial failure: each id carries its own ok/error.
+  interceptBatchDecide: (ids: number[], decision: "allowed" | "denied") =>
+    post<import("@/lib/types").InterceptBatchDecideResult>("/intercept/pending/batch-decide", { ids, decision }),
+  // No body: the server derives the rule from the stored request, which stays pending.
+  interceptAlwaysAllow: (id: number) =>
+    post<{ rule: InterceptRule; created: boolean }>(`/intercept/pending/${id}/always-allow`),
   interceptExecution: (id: number, conversationId?: number) =>
     get<import("@/lib/types").InterceptExecution>(
       `/intercept/history/${id}/execution${conversationId ? `?conversation=${conversationId}` : ""}`,

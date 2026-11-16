@@ -3,7 +3,7 @@ module github.com/Autumn-27/artex
 go 1.26.10
 
 require (
-	github.com/Autumn-27/norma v0.4.5-0.20261018113434-4f5684e56760
+	github.com/Autumn-27/norma v0.4.10
 	github.com/andybalholm/brotli v1.2.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
@@ -16,7 +16,7 @@ require (
 	golang.org/x/net v0.62.0
 	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.52.0
-	mvdan.cc/sh/v3 v3.10.0
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (
@@ -61,4 +61,4 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/Autumn-27/norma => github.com/BaaRai/Norma v0.4.8
+replace github.com/Autumn-27/norma => github.com/BaaRai/Norma v0.4.10

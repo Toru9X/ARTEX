@@ -31,9 +31,13 @@ func TestFindingCaseGuidanceRespectsToolsAndTrafficSwitch(t *testing.T) {
 }
 
 func TestHistoricalFindingReviewFiltersMutationAndProbeTools(t *testing.T) {
-	oldAugment, oldResolve := ToolAugment, ToolResolve
-	ToolAugment, ToolResolve = nil, nil
-	t.Cleanup(func() { ToolAugment, ToolResolve = oldAugment, oldResolve })
+	oldAugment, oldResolve := ToolAugment(), ToolResolve()
+	SetToolAugment(nil)
+	SetToolResolve(nil)
+	t.Cleanup(func() {
+		SetToolAugment(oldAugment)
+		SetToolResolve(oldResolve)
+	})
 	tools := []actool.CoreTool{}
 	for _, name := range []string{"update_finding_report", "bind_finding_traffic", "report_finding", "Bash", "Write", "Edit", "mcp__custom__write", "get_finding_record", "merge_finding_records", "search_finding_duplicates", "get_finding_case", "update_finding_case_report", "complete_finding_case_review"} {
 		tools = append(tools, writeTool(name, name, obj(nil), func(context.Context, json.RawMessage) (actool.Result, error) { return actool.Text("ok"), nil }))

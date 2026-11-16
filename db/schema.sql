@@ -1076,7 +1076,7 @@ CREATE TABLE IF NOT EXISTS intercept_rules (
     enabled         BOOLEAN NOT NULL DEFAULT true,
     priority        INTEGER NOT NULL DEFAULT 0,
     match_target    TEXT NOT NULL CHECK (match_target IN ('tool_name', 'tool_input')),
-    match_type      TEXT NOT NULL CHECK (match_type IN ('string', 'regex')),
+    match_type      TEXT NOT NULL CHECK (match_type IN ('string', 'regex', 'argv')),
     pattern         TEXT NOT NULL,
     action          TEXT NOT NULL CHECK (action IN ('allow', 'deny', 'ask')),
     message         TEXT NOT NULL DEFAULT '',
@@ -1086,6 +1086,10 @@ CREATE TABLE IF NOT EXISTS intercept_rules (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- Allow argv prefix rules on databases created before them (pattern = JSON array of tokens).
+ALTER TABLE intercept_rules DROP CONSTRAINT IF EXISTS intercept_rules_match_type_check;
+ALTER TABLE intercept_rules ADD CONSTRAINT intercept_rules_match_type_check
+    CHECK (match_type IN ('string','regex','argv'));
 DROP TRIGGER IF EXISTS trg_intercept_rules_upd ON intercept_rules;
 CREATE TRIGGER trg_intercept_rules_upd BEFORE UPDATE ON intercept_rules
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -1441,7 +1445,7 @@ CREATE TABLE IF NOT EXISTS notification_channels (
     -- dingtalk DingTalk / feishu Feishu (Lark) / wecom WeCom (WeChat Work) / webhook generic / telegram / email
     kind         TEXT NOT NULL,
     enabled      BOOLEAN NOT NULL DEFAULT true,
-    -- Credentials (stored in plaintext, masked when echoed to the UI; see maskChannelSecrets on the server side).
+    -- Credentials (encrypted at rest by db/secrets.go, masked when echoed to the UI; see notify.MaskConfig).
     -- The six channel kinds differ wildly in fields, so one JSONB column + strict per-kind validation on the Go
     -- side avoids a pile of NULL columns per channel:
     --   dingtalk {webhook,secret}

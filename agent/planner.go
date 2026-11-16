@@ -449,7 +449,7 @@ No duplicates, no padding; but when the goal is unmet and there are uncovered, d
 
 func plannerSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
-	return body + untrustedDataRules + artifactSpec(workDir)
+	return body + untrustedDataRules + artifactSpec(workDir) + noiseProfileBlock()
 }
 
 // Plan runs one planning round. emit, if non-nil, receives the planner's execution
@@ -577,9 +577,12 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks
 	}
+	// The session id is the provider-side identity (session header, usage metering)
+	// with or without persistence; Norma only puts it on ctx when it writes a transcript.
+	opts.SessionID = fmt.Sprintf("exp%d-planner", ts.ID())
+	ctx = transcript.WithSessionID(ctx, opts.SessionID)
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx
-		opts.SessionID = fmt.Sprintf("exp%d-planner", ts.ID())
 	}
 	// Experimental: when on, noa takes over context compression (archives persist under <workDir>/noa/<SessionID>).
 	noaSession := fmt.Sprintf("exp%d-planner", ts.ID())

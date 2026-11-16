@@ -34,6 +34,7 @@ import { type Tone, toneClasses, toneDot } from "@/lib/status";
 import { taskAssetTypeLabel } from "@/lib/task-assets";
 import type { Edge, ExploreKind, FindingAsset, NewAssetType, TaskNode } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { setVisibleInterval } from "@/lib/polling";
 
 const PAGE_SIZES = [20, 50, 100];
 const POLL_MS = 8000;
@@ -517,10 +518,15 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
           // Polling is best-effort: keep the last successful broadcast content and retry automatically next round.
         });
     void load();
-    loadRef.current = load;
+    if (!live) {
+      return () => {
+        alive = false;
+      };
+    }
+    const stopPolling = setVisibleInterval(load, POLL_MS);
     return () => {
       alive = false;
-      loadRef.current = null;
+      stopPolling();
     };
   }, [taskId, page, size, kinds, query, order, live, atLive]);
 

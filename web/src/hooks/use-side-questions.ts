@@ -4,9 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { toast } from "sonner";
 
-import { usePoll } from "@/hooks/use-poll";
 import { sseUrl } from "@/lib/api";
 import { isBtwCommand, type SideExchange, type SideHistory, sideAPI } from "@/lib/side-questions";
+import { setVisibleInterval } from "@/lib/polling";
 
 // crypto.randomUUID is only available in secure contexts (https/localhost); it degrades when accessed via IP+http.
 function newSideRequestID(): string {
@@ -118,7 +118,12 @@ export function useSideQuestions(parent: string | null) {
     };
   }, [parent]);
 
-  usePoll(() => load(), 2000, { enabled: open && !!parent, resetKey: parent });
+  useEffect(() => {
+    if (!open || !parent) return;
+    void load();
+    const stopPolling = setVisibleInterval(() => void load(), 2000);
+    return stopPolling;
+  }, [open, parent, load]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Reconnect after a clear attempt invalidates older callbacks.
   useEffect(() => {

@@ -118,7 +118,7 @@ type RuleForm = {
   enabled: boolean;
   priority: number;
   match_target: "tool_name" | "tool_input";
-  match_type: "string" | "regex";
+  match_type: "string" | "regex" | "argv";
   pattern: string;
   action: InterceptAction;
   message: string;
@@ -140,6 +140,17 @@ const defaultForm = (): RuleForm => ({
   timeout_seconds: 60,
   timeout_action: "deny",
 });
+
+// An argv pattern (JSON array of tokens) shown as a prefix: ["nmap"] -> "nmap *".
+function argvLabel(pattern: string): string {
+  try {
+    const tokens: unknown = JSON.parse(pattern);
+    if (Array.isArray(tokens)) return `${tokens.join(" ")} *`;
+  } catch {
+    // not a JSON array: show the raw pattern
+  }
+  return pattern;
+}
 
 // ---- small components ----
 
@@ -168,6 +179,7 @@ const FOLLOW_ACTIVE = "0"; // profile_id 0 = follow the active/default profile
 
 const defaultJudge = (): JudgeConfig => ({
   enabled: false,
+  mode: "closed",
   profile_id: 0,
   prompt: "",
   timeout_seconds: 15,
@@ -359,7 +371,16 @@ function JudgeCard() {
                     </SelectContent>
                   </Select>
                 </Field>
-                <Field label="Timeout per model verdict (seconds)">
+                <Field label="Judge mode">
+                  <Select value={cfg.mode ?? "closed"} onValueChange={(v) => patch({ mode: v as JudgeConfig["mode"] })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="closed">Closed questions (code decides; prompt is the operator policy; failure asks)</SelectItem>
+                      <SelectItem value="freeform">Free-form prompt (model decides)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Model judge timeout (seconds)">
                   <Input
                     type="number"
                     min={1}
@@ -799,28 +820,33 @@ export default function InterceptPage() {
                         </TableCell>
                         <TableCell>
                           <span className="text-xs text-muted-foreground">
-                            {rule.match_type === "regex" ? "Regex" : "String"}
+                            {rule.match_type === "regex" ? "Regex" : rule.match_type === "argv" ? "Argv prefix" : "String"}
                           </span>
                         </TableCell>
                         <TableCell className="max-w-[220px]">
                           <code className="block truncate rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
-                            {rule.pattern}
+                            {rule.match_type === "argv" ? argvLabel(rule.pattern) : rule.pattern}
                           </code>
                         </TableCell>
                         <TableCell>
                           <ActionBadge action={rule.action} />
                         </TableCell>
                         <TableCell className="text-center">
-                          <Switch checked={rule.enabled} onCheckedChange={() => handleToggle(rule)} />
+                          <Switch
+                            checked={rule.enabled}
+                            onCheckedChange={() => handleToggle(rule)}
+                          />
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center justify-end gap-0.5">
-                            <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => openEdit(rule)}>
+                            <Button
+                              size="icon" variant="ghost" className="h-7 w-7"
+                              onClick={() => openEdit(rule)}
+                            >
                               <PencilIcon className="h-3.5 w-3.5" />
                             </Button>
                             <Button
-                              size="icon"
-                              variant="ghost"
+                              size="icon" variant="ghost"
                               className="h-7 w-7 text-destructive hover:text-destructive"
                               onClick={() => handleDelete(rule.id)}
                             >
@@ -888,20 +914,26 @@ export default function InterceptPage() {
             </Field>
 
             <Field label="Match type">
-              <Select value={form.match_type} onValueChange={(v) => set({ match_type: v as RuleForm["match_type"] })}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
+              <Select
+                value={form.match_type}
+                onValueChange={(v) => {
+                  const match_type = v as RuleForm["match_type"];
+                  // An argv rule always matches the Bash command in tool_input.
+                  set(match_type === "argv" ? { match_type, match_target: "tool_input" } : { match_type });
+                }}
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="string">String contains</SelectItem>
                   <SelectItem value="regex">Regular expression</SelectItem>
+                  <SelectItem value="argv">Argv prefix (Bash only)</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
 
             <Field label="Pattern">
               <Input
-                placeholder={form.match_type === "regex" ? "^Bash$" : "rm -rf"}
+                placeholder={form.match_type === "regex" ? "^Bash$" : form.match_type === "argv" ? '["git","push"]' : "rm -rf"}
                 value={form.pattern}
                 onChange={(e) => set({ pattern: e.target.value })}
                 className={regexErr ? "border-destructive focus-visible:ring-destructive" : ""}
@@ -911,6 +943,13 @@ export default function InterceptPage() {
                 <p className="text-xs text-amber-600 mt-1">
                   Contains Go RE2 extended syntax (e.g. <code className="font-mono">(?i)</code>); the browser cannot
                   preview it, and the server validates on submission
+                </p>
+              )}
+              {form.match_type === "argv" && (
+                <p className="text-xs text-amber-600 mt-1">
+                  JSON array of 1 to 8 tokens: the program and its subcommands, no flags. Matches a single simple Bash command
+                  whose prefix is exactly <code className="font-mono">{argvLabel(form.pattern)}</code>. Flags are not constrained:
+                  <code className="font-mono"> [&quot;git&quot;,&quot;push&quot;]</code> also covers <code className="font-mono">git push --force</code>.
                 </p>
               )}
             </Field>

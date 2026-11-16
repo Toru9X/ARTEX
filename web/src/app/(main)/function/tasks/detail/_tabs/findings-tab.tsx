@@ -22,6 +22,7 @@ import { useStoredSortPreference } from "@/lib/sort-preference";
 import { SEVERITY_FILTER_OPTIONS, statusMeta } from "@/lib/status";
 import type { Finding, FindingStatus, Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { setVisibleInterval } from "@/lib/polling";
 
 const FINDING_SORT_FIELDS: readonly FindingSortField[] = ["time", "severity"];
 const FINDING_SORT_PREFERENCE_KEY = "artex_task_findings_sort";
@@ -153,14 +154,25 @@ export function FindingsTab({ taskId }: { taskId: string }) {
     "desc",
   );
 
-  usePoll(
-    async (signal) => {
-      const fs = await api.findings(taskId);
-      if (!signal.aborted) setFindings(fs); // otherwise keep the last good snapshot
-    },
-    3000,
-    { resetKey: taskId },
-  );
+  React.useEffect(() => {
+    let active = true;
+    const load = () => {
+      api
+        .findings(taskId)
+        .then((fs) => {
+          if (active) setFindings(fs);
+        })
+        .catch(() => {
+          // Keep the last successful snapshot during transient refresh failures.
+        });
+    };
+    load();
+    const stopPolling = setVisibleInterval(load, 3000);
+    return () => {
+      active = false;
+      stopPolling();
+    };
+  }, [taskId]);
 
   const onStatus = React.useCallback(async (f: Finding, next: FindingStatus) => {
     if (f.inherited || !f.finding_id || next === f.status) return;

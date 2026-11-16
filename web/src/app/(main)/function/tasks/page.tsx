@@ -120,7 +120,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { usePoll } from "@/hooks/use-poll";
+import { setVisibleInterval } from "@/lib/polling";
 import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
@@ -489,10 +489,11 @@ export default function TasksPage() {
   // Categories are fetched once, not polled: they change only when this page edits them,
   // and every path that does calls loadCategories itself.
   React.useEffect(() => {
+    load();
     loadCategories();
-  }, [loadCategories]);
-
-  usePoll(() => load(), POLL_MS);
+    const stopPolling = setVisibleInterval(load, POLL_MS);
+    return stopPolling;
+  }, [load, loadCategories]);
 
   const refreshCategoriesAndTasks = React.useCallback(() => {
     lastRef.current = "";
@@ -526,7 +527,12 @@ export default function TasksPage() {
 
   // tick every second so running tasks' duration counts up live — and not while the
   // tab is hidden, where a per-second re-render of the whole table buys nothing.
-  usePoll(() => setNowSec(Math.floor(Date.now() / 1000)), 1000, { enabled: hasRunning });
+  React.useEffect(() => {
+    if (!hasRunning) return;
+    setNowSec(Math.floor(Date.now() / 1000));
+    const stopPolling = setVisibleInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
+    return stopPolling;
+  }, [hasRunning]);
 
   const deleteTask = React.useCallback(
     async (id: string, options: DeleteTaskOptions) => {
@@ -1718,9 +1724,9 @@ function TaskArchivesPanel({ onChanged }: { onChanged: () => void }) {
   // the poll re-reads the latest `load` on every tick, so its timer never restarts.
   React.useEffect(() => {
     void load();
+    const stopPolling = setVisibleInterval(() => void load(), 2_000);
+    return stopPolling;
   }, [load]);
-
-  usePoll(load, 2_000, { leading: false });
 
   const selectable = React.useMemo(
     () => archives.filter((archive) => !ARCHIVE_PROCESSING_STATES.has(archive.state)),

@@ -41,6 +41,7 @@ import type {
   TaskNode,
   TaskScopeRow,
 } from "@/lib/types";
+import { setVisibleInterval } from "@/lib/polling";
 
 // Compact token count formatting (12345 → 12.3k, 2000000 → 2M).
 function fmtTokens(n: number): string {
@@ -350,19 +351,10 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     }
   };
 
-  // The scope is fetched once per task rather than polled: it only moves when the
-  // user edits it here, and that path refreshes it itself.
   React.useEffect(() => {
-    void loadScope();
-  }, [loadScope]);
+    let cancelled = false;
 
-  usePoll(
-    async (signal) => {
-      // Independent of the batch below and of each other; each keeps its last good
-      // value on failure, so none of them is awaited here.
-      void loadTokens();
-      void loadGoals();
-      void loadConstraints();
+    const load = async () => {
       try {
         const [taskResp, statsResp, intentsResp, findingsResp] = await Promise.all([
           api.task(taskId),
@@ -370,7 +362,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           api.intents(taskId),
           api.findings(taskId),
         ]);
-        if (signal.aborted) return;
+        if (cancelled) return;
         const activeTask = statsResp.active_task;
         setTask(
           activeTask
@@ -392,7 +384,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         api
           .taskCoverage(taskId)
           .then((c) => {
-            if (!signal.aborted) setCoverage(c);
+            if (!cancelled) setCoverage(c);
           })
           .catch(() => {
             // A transient coverage failure is retried by the next poll.
@@ -400,10 +392,24 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       } catch {
         // transient errors are ignored; the next poll will retry
       }
-    },
-    3000,
-    { resetKey: taskId },
-  );
+    };
+
+    void load();
+    void loadScope();
+    void loadTokens();
+    void loadGoals();
+    void loadConstraints();
+    const stopPolling = setVisibleInterval(() => {
+      void load();
+      void loadTokens();
+      void loadGoals();
+      void loadConstraints();
+    }, 3000);
+    return () => {
+      cancelled = true;
+      stopPolling();
+    };
+  }, [taskId, loadScope, loadTokens, loadGoals, loadConstraints]);
 
   const running = intents.filter((i) => i.state === "running");
   const open = intents.filter((i) => i.state === "open");

@@ -17,15 +17,25 @@ import { toast } from "sonner";
 
 import { TablePagination } from "@/components/table-pagination";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import type {
   InterceptApprovalFilter,
@@ -34,8 +44,10 @@ import type {
   InterceptDetail,
   InterceptPending,
   InterceptReviewInput,
+  InterceptRisk,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { setVisibleInterval } from "@/lib/polling";
 
 function fmtTime(value?: string) {
   if (!value) return "—";
@@ -124,6 +136,21 @@ function DecidedByBadge({ row }: { row: InterceptApprovalRow }) {
     );
   }
   return <Badge variant="outline">{decidedByLabels[row.decided_by] ?? row.decided_by}</Badge>;
+}
+
+const riskLabels: Record<InterceptRisk["level"], string> = { low: "Low", medium: "Medium", high: "High" };
+
+// RiskBadge shows the server's deterministic risk level of a pending request.
+function RiskBadge({ risk }: { risk?: InterceptRisk }) {
+  if (!risk) return null;
+  let variant: "destructive" | "secondary" | "outline" = "outline";
+  if (risk.level === "high") variant = "destructive";
+  if (risk.level === "medium") variant = "secondary";
+  return (
+    <Badge variant={variant} title={`Risk score ${risk.score}/100`}>
+      {riskLabels[risk.level] ?? risk.level}
+    </Badge>
+  );
 }
 
 function MatchCell({ row, showReason = true }: { row: InterceptApprovalRow; showReason?: boolean }) {
@@ -298,6 +325,38 @@ function DecisionActions({ row, busy, decide }: { row: InterceptApprovalRow; bus
   );
 }
 
+// AlwaysAllowAction creates an argv allow rule from a pending Bash request.
+// The prefix comes from the server; the request itself stays pending.
+function AlwaysAllowAction({ id, prefix }: { id: number; prefix?: string }) {
+  const [busy, setBusy] = React.useState(false);
+  async function create() {
+    setBusy(true);
+    try {
+      const res = await api.interceptAlwaysAllow(id);
+      toast.success(
+        res.created
+          ? "Rule created, the request is still pending approval"
+          : "Rule already exists, the request is still pending approval",
+      );
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      <Button size="sm" variant="outline" className="self-start" disabled={busy} onClick={() => void create()}>
+        {prefix ? `Toujours autoriser "${prefix} *"` : "Toujours autoriser"}
+      </Button>
+      <p className="text-muted-foreground text-xs">
+        The prefix does not constrain flags, and it does not cover what the program does next (git hooks, npm
+        scripts, docker images).
+      </p>
+    </div>
+  );
+}
+
 export function ApprovalDetail({
   row,
   busy,
@@ -405,6 +464,24 @@ export function ApprovalDetail({
             <dd>
               <DecidedByBadge row={current} />
             </dd>
+            {row.risk ? (
+              <>
+                <dt className="text-muted-foreground">Risk</dt>
+                <dd className="flex flex-col gap-1">
+                  <span className="flex items-center gap-2">
+                    <RiskBadge risk={row.risk} />
+                    <span className="text-muted-foreground">{row.risk.score}/100</span>
+                  </span>
+                  {row.risk.reasons.length ? (
+                    <ul className="list-disc pl-4">
+                      {row.risk.reasons.map((reason) => (
+                        <li key={reason}>{reason}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </dd>
+              </>
+            ) : null}
             {audit?.rule_name ? (
               <>
                 <dt className="text-muted-foreground">Rule snapshot</dt>
@@ -419,6 +496,9 @@ export function ApprovalDetail({
             ) : null}
           </dl>
           {!readOnly ? <DecisionActions row={current} busy={busy} decide={decide} /> : null}
+          {!readOnly && current.status === "pending" && row.tool_name === "Bash" ? (
+            <AlwaysAllowAction id={row.id} prefix={detail?.always_allow_prefix} />
+          ) : null}
         </div>
       </div>
       {error ? (
@@ -508,6 +588,12 @@ export function ApprovalDetail({
                 label={`${initialLabel}: ${actionLabels[audit.initial_action] ?? audit.initial_action}`}
                 text={audit.initial_reason.replace(/^\[model\]\s*/, "")}
               />
+              {audit.judge_answers?.length ? (
+                <CodeBlock
+                  label="Judge answers"
+                  text={audit.judge_answers.map((a) => `${a.id}: ${a.answer}${a.evidence ? ` - ${a.evidence}` : ""}`).join("\n")}
+                />
+              ) : null}
               <CodeBlock
                 label="Execution output"
                 text={audit.output ?? (audit.execution_status === "not_executed" ? "Tool not executed." : "No execution output yet")}
@@ -555,21 +641,32 @@ function serverColumnCount() {
   return 10;
 }
 
+type Selection = { selected: Set<number>; toggle: (id: number) => void; toggleAll: () => void };
+
+// Server limit on ids per batch-decide call (maxBatchDecide in server/intercept.go).
+const batchDecideMax = 100;
+
 function ApprovalTable({
   rows,
   busy,
   decide,
   revision,
   label,
+  selection,
 }: {
   rows: InterceptApprovalRow[];
   busy: boolean;
   decide: Decide;
   revision: number;
   label: string;
+  selection?: Selection;
 }) {
   const [expanded, setExpanded] = React.useState<Set<number>>(() => new Set());
-  const columns = React.useSyncExternalStore(subscribeColumns, visibleColumnCount, serverColumnCount);
+  const columns =
+    React.useSyncExternalStore(subscribeColumns, visibleColumnCount, serverColumnCount) + (selection ? 1 : 0);
+  const selectedCount = selection ? rows.filter((row) => selection.selected.has(row.id)).length : 0;
+  let allChecked: boolean | "indeterminate" = selectedCount > 0 ? "indeterminate" : false;
+  if (selectedCount > 0 && selectedCount === rows.length) allChecked = true;
   const prefix = React.useId();
   function toggle(id: number) {
     setExpanded((prev) => {
@@ -583,6 +680,16 @@ function ApprovalTable({
     <Table className="table-fixed" aria-label={label}>
       <TableHeader>
         <TableRow>
+          {selection ? (
+            <TableHead className="w-10">
+              <Checkbox
+                aria-label="Select all pending approvals on this page"
+                checked={allChecked}
+                disabled={busy || !rows.length}
+                onCheckedChange={() => selection.toggleAll()}
+              />
+            </TableHead>
+          ) : null}
           <TableHead className="w-10">
             <span className="sr-only">Expand details</span>
           </TableHead>
@@ -608,6 +715,16 @@ function ApprovalTable({
                 className="cursor-pointer"
                 onClick={() => toggle(row.id)}
               >
+                {selection ? (
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <Checkbox
+                      aria-label={`Select approval #${row.id}`}
+                      checked={selection.selected.has(row.id)}
+                      disabled={busy || row.status !== "pending"}
+                      onCheckedChange={() => selection.toggle(row.id)}
+                    />
+                  </TableCell>
+                ) : null}
                 <TableCell>
                   <Button
                     variant="ghost"
@@ -625,7 +742,10 @@ function ApprovalTable({
                 </TableCell>
                 <TableCell className="hidden text-muted-foreground sm:table-cell">{row.id}</TableCell>
                 <TableCell>
-                  <code className="block truncate text-xs">{row.tool_name}</code>
+                  <div className="flex min-w-0 flex-col items-start gap-1">
+                    <code className="block max-w-full truncate text-xs">{row.tool_name}</code>
+                    <RiskBadge risk={row.risk} />
+                  </div>
                 </TableCell>
                 <TableCell className="hidden md:table-cell">
                   <div className="flex flex-col gap-1">
@@ -686,6 +806,9 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
   const [pendingError, setPendingError] = React.useState("");
   const [deciding, setDeciding] = React.useState(false);
   const [revision, setRevision] = React.useState(0);
+  const [selected, setSelected] = React.useState<Set<number>>(() => new Set());
+  const [batchDecision, setBatchDecision] = React.useState<"allowed" | "denied" | null>(null);
+  const [batchErrors, setBatchErrors] = React.useState<{ id: number; error: string }[]>([]);
   const request = React.useRef(0);
   const decisionLock = React.useRef(false);
   const filterID = React.useId();
@@ -743,12 +866,12 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
   // discards a reply that is still in flight for the filters we are leaving.
   React.useEffect(() => {
     void load();
+    const stopPolling = setVisibleInterval(() => void load(), 5000);
     return () => {
       request.current++;
+      stopPolling();
     };
   }, [load]);
-
-  usePoll(() => load(), 5000, { leading: false });
 
   const changePageSize = (next: number) => {
     setPageSize(next);
@@ -805,6 +928,62 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
       ...historyById.get(row.id),
       ...row,
     }));
+  // Only rows still in the pending queue count as selected.
+  const selectedRows = pending.filter((row) => selected.has(row.id));
+  const selectedHigh = selectedRows.filter((row) => row.risk?.level === "high").length;
+  const selection: Selection = {
+    selected,
+    toggle: (id) =>
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      }),
+    toggleAll: () =>
+      setSelected(selectedRows.length === pending.length ? new Set() : new Set(pending.map((row) => row.id))),
+  };
+
+  // Each id is decided by the server exactly like a single decision. The server
+  // takes at most 100 ids per call (maxBatchDecide in server/intercept.go) and
+  // the pending queue is not paginated, so the selection goes out in sequential
+  // chunks of at most batchDecideMax ids. If a chunk cannot be sent (network
+  // error, 400), sending stops: its ids and the later ones stay selected with
+  // the error, and chunks already decided stay decided. A failed id stays
+  // pending and selected, with its error listed.
+  const batchDecide = async (decision: "allowed" | "denied") => {
+    const ids = selectedRows.map((row) => row.id);
+    if (!ids.length || decisionLock.current) return;
+    decisionLock.current = true;
+    setDeciding(true);
+    let decided = 0;
+    const failed: { id: number; error: string }[] = [];
+    try {
+      for (let start = 0; start < ids.length; start += batchDecideMax) {
+        try {
+          const res = await api.interceptBatchDecide(ids.slice(start, start + batchDecideMax), decision);
+          decided += res.decided;
+          for (const r of res.results) if (!r.ok) failed.push({ id: r.id, error: r.error || "Not decided" });
+        } catch (e) {
+          const error = `Not sent: ${(e as Error).message || "request failed"}`;
+          for (const id of ids.slice(start)) failed.push({ id, error });
+          break;
+        }
+      }
+      request.current++;
+      setBatchErrors(failed);
+      setSelected(new Set(failed.map((f) => f.id)));
+      setRevision((v) => v + 1);
+      const verb = decision === "allowed" ? "allowed" : "denied";
+      if (failed.length) toast.error(`${decided} ${verb}, ${failed.length} not decided (see the errors listed above)`);
+      else toast.success(`${decided} ${verb}`);
+    } finally {
+      decisionLock.current = false;
+      setDeciding(false);
+      setBatchDecision(null);
+      await latestLoad.current(true);
+    }
+  };
   const title = taskId ? "Interception approval" : "Approval records";
   return (
     <div className="flex min-w-0 flex-col gap-5">
@@ -911,15 +1090,85 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
           <AlertDescription>Failed to load pending approvals: {pendingError}. Click Refresh to retry.</AlertDescription>
         </Alert>
       ) : null}
+      {batchErrors.length ? (
+        <Alert variant="destructive">
+          <AlertDescription>
+            <p>{batchErrors.length} selected request(s) were not decided and stay pending:</p>
+            <ul className="list-disc pl-4">
+              {batchErrors.map((f) => (
+                <li key={f.id}>
+                  #{f.id}: {f.error}
+                </li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {pending.length ? (
         <section className="overflow-hidden rounded-xl border">
           <div className="flex items-center gap-2 border-b bg-muted/40 px-4 py-3 font-medium text-sm">
             <ShieldAlertIcon className="size-4" />
             Pending ({pending.length})<span className="text-muted-foreground text-xs">expand to allow or deny</span>
           </div>
-          <ApprovalTable rows={pending} busy={deciding} decide={decide} revision={revision} label="Pending approvals" />
+          <ApprovalTable
+            rows={pending}
+            busy={deciding}
+            decide={decide}
+            revision={revision}
+            label="Pending approvals"
+            selection={selection}
+          />
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3 text-sm">
+            <span className="text-muted-foreground">{selectedRows.length} selected</span>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" disabled={deciding || !selectedRows.length} onClick={() => setBatchDecision("allowed")}>
+                <CheckIcon data-icon="inline-start" />
+                Approve selected
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={deciding || !selectedRows.length}
+                onClick={() => setBatchDecision("denied")}
+              >
+                <XIcon data-icon="inline-start" />
+                Deny selected
+              </Button>
+            </div>
+          </div>
         </section>
       ) : null}
+      <AlertDialog
+        open={batchDecision != null}
+        onOpenChange={(open) => {
+          if (!open && !deciding) setBatchDecision(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {batchDecision === "denied" ? "Deny" : "Approve"} {selectedRows.length} request(s)?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {selectedHigh ? `${selectedHigh} of them are high risk.` : "None of them is high risk."} Each request is
+              decided on its own; one that cannot be decided stays pending and is listed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deciding}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant={batchDecision === "denied" ? "destructive" : "default"}
+              disabled={deciding || !selectedRows.length}
+              onClick={(event) => {
+                event.preventDefault();
+                if (batchDecision) void batchDecide(batchDecision);
+              }}
+            >
+              {batchDecision === "denied" ? "Deny selected" : "Approve selected"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <section className="overflow-hidden rounded-xl border">
         <div className="border-b px-4 py-3 font-medium text-sm">
           {filtered ? "Filtered results" : "All records"} ({total})

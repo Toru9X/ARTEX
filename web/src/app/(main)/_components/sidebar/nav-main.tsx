@@ -38,6 +38,7 @@ import type {
   NavMainLinkItem,
   NavMainParentItem,
 } from "@/navigation/sidebar/sidebar-items";
+import { setVisibleInterval } from "@/lib/polling";
 
 interface NavMainProps {
   readonly items: readonly NavGroup[];
@@ -166,13 +167,18 @@ function NavItem({ item, isItemActive, isSubItemActive, isSubmenuOpen }: NavItem
 // count badge when there are unresolved approval requests.
 function InterceptPendingBadge() {
   const [count, setCount] = React.useState(0);
-  // The sidebar is mounted on every page, so this was the one poll that ran for
-  // the whole session, hidden tab included. usePoll stops it while the tab is in
-  // the background and refreshes the badge the moment it comes back.
-  usePoll(async (signal) => {
-    const list = await api.interceptPending();
-    if (!signal.aborted) setCount(list.length);
-  }, 5000);
+  React.useEffect(() => {
+    let live = true;
+    async function poll() {
+      try {
+        const list = await api.interceptPending();
+        if (live) setCount(list.length);
+      } catch { /* ignore */ }
+    }
+    poll();
+    const stopPolling = setVisibleInterval(poll, 5000);
+    return () => { live = false; stopPolling(); };
+  }, []);
   if (count === 0) return null;
   return (
     <SidebarMenuBadge className="flex h-4.5 min-w-[18px] items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold leading-none text-white shadow-sm ring-1 ring-amber-400/40">
