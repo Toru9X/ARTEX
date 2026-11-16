@@ -93,7 +93,7 @@ func TestJudgeRetriesBeforeApplyingFailurePolicy(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			settings := map[string]string{
-				settingJudgeEnabled: "true", settingJudgeRetryCount: "2", settingJudgeRetryIntervalMS: "0",
+				settingJudgeEnabled: "true", settingJudgeRetryCount: "2", settingJudgeRetryIntervalMS: "0", settingJudgeMode: JudgeModeFreeform,
 			}
 			if tc.failAction != "" {
 				settings[settingJudgeFailAction] = tc.failAction
@@ -161,7 +161,7 @@ func TestJudgeDefaultRetriesAndExplicitDisable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			settings := map[string]string{
-				settingJudgeEnabled: "true", settingJudgeFailAction: "deny", settingJudgeRetryIntervalMS: "0",
+				settingJudgeEnabled: "true", settingJudgeFailAction: "deny", settingJudgeRetryIntervalMS: "0", settingJudgeMode: JudgeModeFreeform,
 			}
 			for key, value := range tc.settings {
 				settings[key] = value

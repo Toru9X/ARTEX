@@ -25,7 +25,7 @@ func TestPythonPrecedingShellEffectsWithoutExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(python, filepath.Join(bin, "python3")); err != nil {
-		t.Fatal(err)
+		t.Skipf("skipping symlink test on unprivileged host: %v", err)
 	}
 	t.Setenv("PATH", bin)
 	for _, k := range []string{"PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSAFEPATH"} {

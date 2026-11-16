@@ -120,29 +120,30 @@ func TestPythonModuleSourceResolutionWithoutExecution(t *testing.T) {
 	t.Setenv("PYTHONHOME", "")
 	t.Setenv("PYTHONUSERBASE", "")
 	t.Setenv("PYTHONSAFEPATH", "")
-	in := reviewCommandForTest(t, cwd, python+" -m json.tool")
+	pythonCmd := filepath.ToSlash(python)
+	in := reviewCommandForTest(t, cwd, pythonCmd+" -m json.tool")
 	if in.ScriptCaptureStatus != "complete" || len(in.Scripts) != 2 || in.Scripts[1].Path != mustCanonicalPath(t, filepath.Join(library, "json", "tool.py")) {
 		t.Fatalf("missing standard module sources: %+v", in)
 	}
-	in = reviewCommandForTest(t, cwd, python+" -m toolpkg")
+	in = reviewCommandForTest(t, cwd, pythonCmd+" -m toolpkg")
 	if in.ScriptCaptureStatus != "complete" || len(in.Scripts) != 2 || in.Scripts[1].Content != "PACKAGE_MAIN=1\n" {
 		t.Fatalf("missing package entry: %+v", in)
 	}
-	in = reviewCommandForTest(t, cwd, python+" -S -m toolpkg")
+	in = reviewCommandForTest(t, cwd, pythonCmd+" -S -m toolpkg")
 	if in.ScriptCaptureStatus != "incomplete" {
 		t.Fatal("ignored -S and searched site-packages")
 	}
 	write(filepath.Join(cwd, "json", "__init__.py"), "LOCAL_INIT=1\n")
 	write(filepath.Join(cwd, "json", "tool.py"), "LOCAL_TOOL=1\n")
-	in = reviewCommandForTest(t, cwd, python+" -m json.tool")
+	in = reviewCommandForTest(t, cwd, pythonCmd+" -m json.tool")
 	if in.ScriptCaptureStatus != "complete" || in.Scripts[1].Content != "LOCAL_TOOL=1\n" {
 		t.Fatalf("ignored cwd module shadowing: %+v", in)
 	}
-	in = reviewCommandForTest(t, cwd, python+" -W -I -m json.tool")
+	in = reviewCommandForTest(t, cwd, pythonCmd+" -W -I -m json.tool")
 	if in.ScriptCaptureStatus != "complete" || in.Scripts[1].Content != "LOCAL_TOOL=1\n" {
 		t.Fatalf("warning option value mistaken for isolation flag: %+v", in)
 	}
-	in = reviewCommandForTest(t, cwd, python+" -I -m json.tool")
+	in = reviewCommandForTest(t, cwd, pythonCmd+" -I -m json.tool")
 	if in.ScriptCaptureStatus != "complete" || in.Scripts[1].Content == "LOCAL_TOOL=1\n" {
 		t.Fatal("isolated Python searched cwd")
 	}
@@ -151,41 +152,42 @@ func TestPythonModuleSourceResolutionWithoutExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(filepath.Join(missingDir, "json.py"), "NOT_A_PACKAGE=1\n")
-	in = reviewCommandForTest(t, missingDir, python+" -m json.tool")
+	in = reviewCommandForTest(t, missingDir, pythonCmd+" -m json.tool")
 	if in.ScriptCaptureStatus != "incomplete" {
 		t.Fatal("substituted stdlib despite a shadowing non-package module")
 	}
 	extra := filepath.Join(root, "extra")
+	extraCmd := filepath.ToSlash(extra)
 	write(filepath.Join(extra, "one.py"), "EXTRA=1\n")
-	in = reviewCommandForTest(t, cwd, "PYTHONPATH="+extra+" "+python+" -m one")
+	in = reviewCommandForTest(t, cwd, "PYTHONPATH="+extraCmd+" "+pythonCmd+" -m one")
 	if in.ScriptCaptureStatus != "complete" || in.Scripts[0].Content != "EXTRA=1\n" {
 		t.Fatalf("ignored explicit PYTHONPATH: %+v", in)
 	}
-	in = reviewCommandForTest(t, cwd, "PYTHONPATH="+extra+" "+python+" -E -m one")
+	in = reviewCommandForTest(t, cwd, "PYTHONPATH="+extraCmd+" "+pythonCmd+" -E -m one")
 	if in.ScriptCaptureStatus != "incomplete" {
 		t.Fatal("ignored -E environment isolation")
 	}
 	for _, command := range []string{
-		"env -i " + python + " -m json.tool",
-		"C='env -i " + python + "'; $C -m json.tool",
-		"env -u PYTHONPATH " + python + " -m json.tool",
-		"PYTHONPATH=" + extra + "; export PYTHONPATH; " + python + " -m json.tool",
-		"PYTHONPATH=" + extra + "; " + python + " -m json.tool",
-		"eval 'export PYTHONPATH=unknown'; " + python + " -m json.tool",
+		"env -i " + pythonCmd + " -m json.tool",
+		"C='env -i " + pythonCmd + "'; $C -m json.tool",
+		"env -u PYTHONPATH " + pythonCmd + " -m json.tool",
+		"PYTHONPATH=" + extraCmd + "; export PYTHONPATH; " + pythonCmd + " -m json.tool",
+		"PYTHONPATH=" + extraCmd + "; " + pythonCmd + " -m json.tool",
+		"eval 'export PYTHONPATH=unknown'; " + pythonCmd + " -m json.tool",
 	} {
 		if in := reviewCommandForTest(t, cwd, command); in.ScriptCaptureStatus != "incomplete" {
 			t.Fatalf("guessed a module after an environment change: %+v", in)
 		}
 	}
-	in = reviewCommandForTest(t, cwd, "cat > generated.py <<'PY'\nGENERATED=1\nPY\n"+python+" -m generated")
+	in = reviewCommandForTest(t, cwd, "cat > generated.py <<'PY'\nGENERATED=1\nPY\n"+pythonCmd+" -m generated")
 	if in.ScriptCaptureStatus != "complete" || in.Scripts[0].Source != "command" || in.Scripts[0].Content != "GENERATED=1\n" {
 		t.Fatalf("ignored generated local module: %+v", in)
 	}
-	in = reviewCommandForTest(t, "", python+" -m json.tool")
+	in = reviewCommandForTest(t, "", pythonCmd+" -m json.tool")
 	if in.ScriptCaptureStatus != "incomplete" {
 		t.Fatal("guessed module location with unknown cwd")
 	}
-	in = reviewCommandForTest(t, "", python+" -I -m json.tool")
+	in = reviewCommandForTest(t, "", pythonCmd+" -I -m json.tool")
 	if in.ScriptCaptureStatus != "complete" {
 		t.Fatalf("isolated stdlib does not require cwd: %+v", in)
 	}

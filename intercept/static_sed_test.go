@@ -4,11 +4,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestStaticSedSnapshotsMatchNativeSed(t *testing.T) {
+	if _, err := exec.LookPath("sed"); err != nil {
+		t.Skip("sed executable not found in PATH")
+	}
 	dir := t.TempDir()
 	source := "probe2_results.txt probe2_results.txt\nbodies2/a\naXb a.b\n"
 	path := filepath.Join(dir, "old.sh")
@@ -81,6 +85,9 @@ func TestStaticSedRejectsOpaqueOrUnsafeLayouts(t *testing.T) {
 	}
 }
 func TestStaticSedGeneratedInputAndBounds(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping sed snapshot test on windows (requires /bin/sed)")
+	}
 	dir := t.TempDir()
 	in := reviewCommandForTest(t, dir, "cat > old.sh <<'SH'\necho old\nSH\nsed 's/old/new/' old.sh > new.sh; bash new.sh")
 	if in.ScriptCaptureStatus != "complete" || in.Scripts[0].Content != "echo new\n" {

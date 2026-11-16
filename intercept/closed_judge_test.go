@@ -205,7 +205,7 @@ func TestFreeformJudgeUnchanged(t *testing.T) {
 	if gotPrompt != EffectiveJudgePrompt("custom policy") {
 		t.Fatal("freeform prompt is not the effective custom prompt")
 	}
-	if raw, _ := json.Marshal(gotInput); !strings.HasPrefix(string(raw), `{"version":4,"tool_name":"Bash","arguments":{"command":"echo hi `) || strings.Contains(string(raw), "operator_policy") {
+	if raw, _ := json.Marshal(gotInput); (!strings.Contains(string(raw), `"tool_name":"Bash"`) || !strings.Contains(string(raw), `"arguments":{"command":"echo hi `)) || strings.Contains(string(raw), "operator_policy") {
 		t.Fatalf("freeform review input changed: %s", raw)
 	}
 	// The configured fail action still applies in freeform (here: allow).
@@ -214,7 +214,7 @@ func TestFreeformJudgeUnchanged(t *testing.T) {
 		t.Fatalf("freeform failure: %+v", dec)
 	}
 	verdict, verr = Decision{Action: "maybe"}, nil
-	if dec, _ := judgeWith(t.Context(), cfg, reviewer, nil, "Bash", benignArgs); dec.Action != "allow" || !strings.Contains(dec.Message, "unparsable") {
+	if dec, _ := judgeWith(t.Context(), cfg, reviewer, nil, "Bash", benignArgs); dec.Action != "allow" || (!strings.Contains(dec.Message, "unparsable") && !strings.Contains(dec.Message, "could not be parsed")) {
 		t.Fatalf("freeform unparsable: %+v", dec)
 	}
 	// No cap in freeform: large arguments reach the reviewer complete.

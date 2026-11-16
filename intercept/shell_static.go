@@ -522,7 +522,13 @@ func unquotedExpansion(value string) bool {
 			i++
 			continue
 		}
-		if strings.ContainsRune("*?[]~", rune(value[i])) {
+		// In POSIX shells, tilde expansion only applies when '~' is at the start of a word
+		// or immediately following a ':' (e.g. in PATH-style variable assignments).
+		// A tilde in the middle of a word (such as Windows 8.3 short paths) is literal.
+		if value[i] == '~' && (i == 0 || value[i-1] == ':') {
+			return true
+		}
+		if strings.ContainsRune("*?[]", rune(value[i])) {
 			return true
 		}
 	}

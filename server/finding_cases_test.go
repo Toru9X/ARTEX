@@ -20,11 +20,11 @@ func testCaseServer(t *testing.T) (*Server, int64, []int64) {
 	t.Helper()
 	dsn, _, err := db.DSN()
 	if err != nil {
-		t.Fatal(err)
+		t.Skip("skipping test with no database: ", err)
 	}
 	pg, err := db.Open(dsn)
 	if err != nil {
-		t.Fatal(err)
+		t.Skip("skipping test, cannot connect to database: ", err)
 	}
 	t.Cleanup(func() { pg.Close() })
 	task, err := pg.CreateTask("case server", "goal", nil, 0, 0)

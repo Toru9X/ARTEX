@@ -144,7 +144,7 @@ func TestOpenScanOutputConfinement(t *testing.T) {
 	}
 	write(filepath.Join(root, "sub", "in.xml"))
 	if err := os.Symlink(filepath.Join(outside, "secret.xml"), filepath.Join(root, "link.xml")); err != nil {
-		t.Fatal(err)
+		t.Skipf("skipping symlink confinement test on unprivileged host: %v", err)
 	}
 	if err := os.Symlink(outside, filepath.Join(root, "dir")); err != nil {
 		t.Fatal(err)
