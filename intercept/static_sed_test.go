@@ -10,6 +10,9 @@ import (
 )
 
 func TestStaticSedSnapshotsMatchNativeSed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping sed snapshot test on windows (requires /bin/sed)")
+	}
 	if _, err := exec.LookPath("sed"); err != nil {
 		t.Skip("sed executable not found in PATH")
 	}
