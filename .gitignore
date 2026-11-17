@@ -29,9 +29,7 @@ web/next-env.d.ts
 .vscode/
 *.swp
 *.swo
-
-# docs
-/docs/
+/docs/superpowers/
 
 # os
 .DS_Store

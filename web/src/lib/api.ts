@@ -115,6 +115,8 @@ import type {
   TrafficEvidenceRef,
   TrafficEvidenceRole,
   TrafficHost,
+  TrafficReplayRequest,
+  TrafficReplayResult,
   TrafficResp,
   TrafficStreamPage,
   UsageStats,
@@ -125,6 +127,18 @@ import type {
 function getToken(): string | null {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("artex_token");
+}
+
+// ApiError is what http() throws for a non-2xx response: the message is the
+// server's {error} (or "METHOD path: status"), and status lets callers tell
+// failures apart.
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
 }
 
 export async function http<T>(path: string, init?: RequestInit): Promise<T> {
@@ -157,7 +171,7 @@ export async function http<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Keep the status-based fallback for empty or non-JSON error responses.
     }
-    throw new Error(message);
+    throw new ApiError(message, r.status);
   }
   if (r.status === 204) return undefined as T;
   return r.json();
@@ -314,6 +328,7 @@ export const api = {
     description: string;
     goal: string;
     llmProfileIds?: number[];
+    llmRotate?: boolean;
     sourceTaskIds?: string[];
     companyIds?: number[];
     timeoutSeconds?: number;
@@ -329,6 +344,7 @@ export const api = {
       description: input.description,
       goal: input.goal,
       llm_profile_ids: input.llmProfileIds ?? [],
+      llm_rotate: input.llmRotate ?? false,
       source_task_ids: input.sourceTaskIds ?? [],
       company_ids: input.companyIds ?? [],
       timeout_seconds: input.timeoutSeconds ?? 0,
@@ -368,10 +384,11 @@ export const api = {
     input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">>,
   ) => patch<TaskTemplate>(`/task-templates/${id}`, input),
   deleteTaskTemplate: (id: number) => del<{ deleted: number }>(`/task-templates/${id}`),
-  updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number) =>
+  updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number, llmRotate?: boolean) =>
     put<{
       id: string;
       llm_profile_ids: number[];
+      llm_rotate: boolean;
       active_llm_profile_id?: number;
       llm_failover_state: string;
       reopened_intents: number;
@@ -379,6 +396,7 @@ export const api = {
     }>(`/tasks/${id}/llm`, {
       llm_profile_ids: llmProfileIds,
       active_llm_profile_id: activeLLMProfileId ?? null,
+      llm_rotate: llmRotate,
     }),
   deleteTask: (id: string, options: DeleteTaskOptions) => del<DeleteTaskResult>(`/tasks/${id}`, options),
   controlTask: (id: string, action: "pause" | "resume") =>
@@ -949,6 +967,12 @@ export const api = {
     });
     if (!r.ok) throw new Error(`Blob download failed: ${r.status}`);
     return new Uint8Array(await r.arrayBuffer());
+  },
+  // Re-sends an edited request through the proxy. Errors carry the HTTP status
+  // (ApiError): 413 body too large, 502 proxy/upstream, 503 capture off, 504 timeout.
+  trafficReplay: async (req: TrafficReplayRequest) => {
+    if (MOCK) throw new Error("Replay is not available in mock mode");
+    return post<TrafficReplayResult>(`/traffic/replay`, req);
   },
   trafficHosts: () => get<{ hosts: TrafficHost[] }>(`/traffic/hosts`),
   trafficDeleteHost: (host: string) => del<{ deleted: number }>(`/traffic?host=${encodeURIComponent(host)}`),

@@ -1231,10 +1231,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// Per-intent LLM rotation (#85): each claimed worker intent runs on the
 	// next chain head. The pin travels through the run context into the
 	// provider resolver; non-worker roles and failover keep the active head.
-	if t.LLMRotate {
-		if head, ok := t.nextRotatedProfile(); ok {
-			ctx = withLLMProfilePin(ctx, head)
-		}
+	if head, ok := t.nextRotatedProfile(); ok {
+		ctx = withLLMProfilePin(ctx, head)
 	}
 	hasChatMessage := message != ""
 	// Open the execution segment here rather than at admission: this is the

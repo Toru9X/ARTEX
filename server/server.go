@@ -1071,6 +1071,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/intercept/rules/{id}", s.interceptDeleteRule)
 	mux.HandleFunc("POST /api/intercept/rules/{id}/toggle", s.interceptToggleRule)
 
+	// capture-proxy rewrite rule management (stored and compiled; not applied by the proxy yet)
+	mux.HandleFunc("GET /api/traffic/rewrite-rules", s.rewriteListRules)
+	mux.HandleFunc("POST /api/traffic/rewrite-rules", s.rewriteCreateRule)
+	mux.HandleFunc("PUT /api/traffic/rewrite-rules/{id}", s.rewriteUpdateRule)
+	mux.HandleFunc("DELETE /api/traffic/rewrite-rules/{id}", s.rewriteDeleteRule)
+	mux.HandleFunc("POST /api/traffic/rewrite-rules/{id}/toggle", s.rewriteToggleRule)
+
 	// asset interception rule management (global blocklist: domains/IPs/URLs/CIDRs)
 	mux.HandleFunc("GET /api/asset-intercept/rules", s.assetInterceptListRules)
 	mux.HandleFunc("POST /api/asset-intercept/rules", s.assetInterceptCreateRule)
@@ -1777,7 +1784,7 @@ type createTaskReq struct {
 	SourceTaskIDs        []string `json:"source_task_ids,omitempty"` // direct, read-only inherited source tasks
 	CompanyIDs           []int64  `json:"company_ids,omitempty"`     // links the company scope and snapshots its current assets; does not copy assets or force intent generation
 	TimeoutSeconds       int      `json:"timeout_seconds"`
-	LLMRotate            *bool    `json:"llm_rotate"`                  // task-level timeout (seconds); 0/omitted = no limit
+	LLMRotate            *bool    `json:"llm_rotate"`                  // distribute worker intents across the ordered profiles
 	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner heartbeat interval (seconds); 0/omitted = default 600 (10min); floor = default = 600, lower values are raised to 600
 	PlanQuietMode        *bool    `json:"plan_quiet_mode,omitempty"`   // planner quiet-mode switch (#86); omitted = default on; false = edge rounds always plan
 	TargetGate           *bool    `json:"target_gate,omitempty"`       // approval gate for asset targets, opt-in; omitted/null = off
@@ -1932,7 +1939,7 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	if req.ActiveLLMProfileID != nil {
 		active = *req.ActiveLLMProfileID
 	}
-	reopened, err := s.m.ReplaceTaskLLMProfiles(t.ID, req.LLMProfileIDs, active)
+	reopened, err := s.m.ReplaceTaskLLMProfiles(t.ID, req.LLMProfileIDs, active, req.LLMRotate)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -1952,6 +1959,7 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	llmState := t.llmStateSnapshot()
 	result := map[string]any{
 		"id": t.ID, "llm_profile_ids": llmState.ProfileIDs,
+		"llm_rotate":            llmState.Rotate,
 		"active_llm_profile_id": llmState.ActiveID,
 		"llm_failover_state":    llmState.FailoverState, "reopened_intents": reopened,
 	}
@@ -4642,14 +4650,35 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 			counts[ty] = len(ns)
 		}
 	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	var ledger *db.CoverageLedger
 	if t.CoverageEnabled {
-		taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 		ledger, _ = s.m.Assets().CoverageLedger(taskID)
+	}
+	// The exploration node payload carries only name/summary/evidence/severity/
+	// vulnclass. Everything the report says about proof strength (poe level,
+	// verification state and note, counterevidence, confidence rationale, both
+	// evidence versions, the reporter-written body) lives on the standalone findings
+	// row, joined by node_id, and one report-only query fetches all of it. The
+	// findings list keeps its own lean meta query: folding report bodies into it
+	// would fetch multi-KB text for rows that never render it.
+	//
+	// A lookup failure is not an absence. The report is generated on demand and can
+	// be retried, so a failed read fails loudly instead of rendering every finding as
+	// "not assessed" — a database error must never become a claim about the finding.
+	quality := map[int64]db.FindingQuality{} // pg-less deployments have no standalone rows at all
+	if s.m.pg != nil {
+		var err error
+		if quality, err = s.m.pg.FindingQualityByNodeID(taskID); err != nil {
+			log.Printf("[report] task=%s finding quality: %v", t.ID, err)
+			writeErr(w, 500, "report unavailable: the finding quality lookup failed, retry")
+			return
+		}
 	}
 	md := report.Markdown(report.Input{
 		Title: t.Description, Goal: t.Goal, GeneratedAt: time.Now(),
 		AssetCounts: counts, Findings: findings, Coverage: ledger,
+		Quality: quality,
 	})
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.WriteHeader(200)

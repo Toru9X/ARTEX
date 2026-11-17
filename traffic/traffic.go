@@ -31,6 +31,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/traffic/rewrite"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
@@ -200,6 +201,10 @@ type Traffic struct {
 	// fails. Best-effort and asynchronous: it must never block the MITM.
 	upstreamMu      sync.RWMutex
 	upstreamFailure func(error)
+
+	// rewriteRules is the compiled snapshot of the rewrite rules, replaced as a
+	// whole by SetRewriteRules. The proxy does not apply it yet.
+	rewriteRules atomic.Pointer[rewrite.Set]
 }
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
@@ -379,6 +384,14 @@ func (t *Traffic) reportUpstreamFailure(err error) {
 		go fn(err)
 	}
 }
+
+// SetRewriteRules publishes a compiled snapshot of the rewrite rules. The swap
+// is atomic; nil clears the rules. The snapshot is stored only: the proxy does
+// not apply rewrite rules yet, so capture is unchanged whatever it holds.
+func (t *Traffic) SetRewriteRules(s *rewrite.Set) { t.rewriteRules.Store(s) }
+
+// RewriteRules returns the snapshot last published, nil when there is none.
+func (t *Traffic) RewriteRules() *rewrite.Set { return t.rewriteRules.Load() }
 
 // ValidateProxyURL parses and checks a proxy URL (http/https/socks5, optional
 // user:pass), returning the parsed URL. Exposed so callers can validate a global
