@@ -80,10 +80,21 @@ func intelligenceWorkflow(ctx context.Context, tools []actool.CoreTool) ([]actoo
 			if json.Unmarshal(raw, &schema) == nil {
 				props, _ := schema["properties"].(map[string]any)
 				if props != nil {
+					intelProp := map[string]any{"type": "array", "maxItems": 20, "description": "Write intelligence back together with the fact; the fields match record_intelligence, so that tool need not be called separately", "items": intelligenceSchema()}
 					delete(props, "intelligence")
 					if enabled {
-						props["intelligence"] = map[string]any{"type": "array", "maxItems": 20, "description": "Write intelligence back together with the fact; the fields match record_intelligence, so that tool need not be called separately", "items": intelligenceSchema()}
+						props["intelligence"] = intelProp
 						hasFact = true
+					}
+					if factsProp, ok := props["facts"].(map[string]any); ok {
+						if items, ok := factsProp["items"].(map[string]any); ok {
+							if itemProps, ok := items["properties"].(map[string]any); ok {
+								delete(itemProps, "intelligence")
+								if enabled {
+									itemProps["intelligence"] = intelProp
+								}
+							}
+						}
 					}
 				}
 				tool = DecorateTool(tool, tool.Description(), schema)
