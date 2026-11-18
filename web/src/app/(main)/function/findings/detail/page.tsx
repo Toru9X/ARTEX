@@ -25,9 +25,14 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { statusMeta } from "@/lib/status";
-import type { Finding, FindingStatus, Severity } from "@/lib/types";
+import type { Finding, FindingReportState, FindingStatus, Severity } from "@/lib/types";
 
-import { VerificationBadge } from "../_components/findings-table";
+import {
+  FINDING_REPORT_STATES,
+  REPORT_STATE_META,
+  ReportStateBadge,
+  VerificationBadge,
+} from "../_components/findings-table";
 import { FindingLineageView } from "./lineage";
 
 const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
@@ -126,6 +131,23 @@ function FindingDetailInner() {
     [finding, id],
   );
 
+  const changeReportState = React.useCallback(
+    async (next: FindingReportState) => {
+      if (!finding || finding.inherited || next === (finding.report_state ?? "none")) return;
+      const prev = finding.report_state ?? "none";
+      setFinding({ ...finding, report_state: next });
+      try {
+        const updated = await api.setFindingReportState(id, next);
+        setFinding(updated);
+        toast.success(`Report stage changed to "${REPORT_STATE_META[next].label}"`);
+      } catch (e) {
+        setFinding((cur) => (cur ? { ...cur, report_state: prev } : cur));
+        toast.error("Update failed: " + (e as Error).message);
+      }
+    },
+    [finding, id],
+  );
+
   const generateReport = React.useCallback(async () => {
     if (!finding || finding.inherited || reportGenerating) return;
     setReportGenerating(true);
@@ -191,6 +213,7 @@ function FindingDetailInner() {
             <Separator orientation="vertical" className="mx-1 h-4" />
             <StatusBadge domain="severity" value={finding.severity} dot />
             <StatusBadge domain="finding" value={finding.status} dot />
+            <ReportStateBadge state={finding.report_state} />
             <VerificationBadge finding={finding} />
             <Button
               variant="outline"
@@ -382,6 +405,34 @@ function FindingDetailInner() {
                               {FINDING_STATUSES.map((st) => (
                                 <SelectItem key={st} value={st}>
                                   {statusMeta("finding", st).label}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                      )}
+                    </FieldRow>
+
+                    {/* Report stage */}
+                    <FieldRow label="Report stage">
+                      {finding.inherited ? (
+                        <ReportStateBadge state={finding.report_state} />
+                      ) : (
+                        <Select
+                          value={finding.report_state ?? "none"}
+                          onValueChange={(v) => changeReportState(v as FindingReportState)}
+                        >
+                          <SelectTrigger
+                            size="sm"
+                            className="h-7 w-auto border-none px-1 shadow-none focus-visible:ring-0"
+                          >
+                            <ReportStateBadge state={finding.report_state} />
+                          </SelectTrigger>
+                          <SelectContent position="popper" align="end">
+                            <SelectGroup>
+                              {FINDING_REPORT_STATES.map((st) => (
+                                <SelectItem key={st} value={st}>
+                                  {REPORT_STATE_META[st].label}
                                 </SelectItem>
                               ))}
                             </SelectGroup>

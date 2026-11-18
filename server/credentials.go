@@ -126,7 +126,7 @@ func (s *Server) processCredentialJob(parent context.Context, item *db.Intellige
 			result.Accounts = accounts
 		} else {
 			result.Method = "agent"
-			prov, cfg, ok := s.agentBindingProvider(db.CredentialAgentKey)
+			prov, cfg, _, ok := s.agentBindingProvider(db.CredentialAgentKey)
 			if !ok {
 				prov, cfg, ok = s.globalProvider()
 			}

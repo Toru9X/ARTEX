@@ -24,7 +24,7 @@ func TestDeepSeekSearchCredsOverride(t *testing.T) {
 	if err := m.pg.SetActiveProfile(id); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.SetWebSearch(true, deepSeekWebSearchBackend, nil, nil, nil); err != nil {
+	if err := m.SetWebSearch(true, deepSeekWebSearchBackend, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	set := func(key, value string) {

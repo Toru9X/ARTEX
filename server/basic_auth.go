@@ -168,7 +168,7 @@ func (s *Server) saveBasicAuthSettings(w http.ResponseWriter, r *http.Request) {
 		Username *string `json:"username"`
 		Password string  `json:"password"`
 	}
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, 400, "malformed request")
 		return
 	}

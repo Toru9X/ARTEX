@@ -230,6 +230,13 @@ func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority
 		return 0, err
 	}
 	defer tx.Rollback()
+	// Validate fact anchors before creating a node. Key-share locks retain the
+	// checked assets through commit, closing the check/insert deletion race.
+	if kind == KindFact && len(anchors) > 0 {
+		if err := checkFactAnchorAssets(tx, anchors); err != nil {
+			return 0, err
+		}
+	}
 	var id int64
 	if err := tx.QueryRow(`
 INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
@@ -243,6 +250,40 @@ VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
 		}
 	}
 	return id, tx.Commit()
+}
+
+func checkFactAnchorAssets(tx *sql.Tx, ids []int64) error {
+	rows, err := tx.Query("SELECT id FROM assets WHERE id = ANY($1::bigint[]) ORDER BY id FOR KEY SHARE", ids)
+	if err != nil {
+		return err
+	}
+	found := make(map[int64]bool, len(ids))
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		found[id] = true
+	}
+	err = rows.Err()
+	closeErr := rows.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	var missing []int64
+	for _, id := range ids {
+		if !found[id] {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) != 0 {
+		return fmt.Errorf("asset IDs do not exist: %v; use existing IDs or register the assets first", missing)
+	}
+	return nil
 }
 
 // AddIntent is a convenience: an open intent.
@@ -354,7 +395,10 @@ WHERE exploration_id=$1 AND kind='intent' AND state='running'
 	if err != nil {
 		return 0, err
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
 	return n, nil
 }
 
@@ -1388,14 +1432,24 @@ func (s *ExplorationStore) Stats() (map[string]int, error) {
 
 // --- activity (poll by global id cursor) ---
 
+// queryRower is the subset of *sql.DB and *sql.Tx that AppendActivity needs,
+// so a replay can insert the activity and delete the outbox row together.
+type queryRower interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // AppendActivity records one worker step and returns its id.
 func (s *ExplorationStore) AppendActivity(a Activity) (int64, error) {
+	return s.appendActivity(s.db, a)
+}
+
+func (s *ExplorationStore) appendActivity(q queryRower, a Activity) (int64, error) {
 	metadata := a.Metadata
 	if len(metadata) == 0 {
 		metadata = json.RawMessage(`{}`)
 	}
 	var id int64
-	err := s.db.QueryRow(`
+	err := q.QueryRow(`
 INSERT INTO activity(exploration_id, node_id, worker, kind, tool, tool_use_id, is_error, summary, detail, metadata, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, main_seg)
 VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,$13,$14,$15)
 RETURNING id`, s.expID, a.NodeID, utf8Clean(a.Worker), utf8Clean(a.Kind), utf8Clean(a.Tool), utf8Clean(a.ToolUseID), a.IsError, utf8Clean(a.Summary), utf8Clean(a.Detail),

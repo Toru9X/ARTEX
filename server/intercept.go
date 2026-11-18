@@ -191,7 +191,7 @@ func (s *Server) interceptCreateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req interceptRuleReq
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -219,7 +219,7 @@ func (s *Server) interceptUpdateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req interceptRuleReq
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -267,7 +267,7 @@ func (s *Server) interceptToggleRule(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Enabled bool `json:"enabled"`
 	}
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -450,7 +450,7 @@ func (s *Server) interceptDecide(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Decision string `json:"decision"` // "allowed" | "denied"
 	}
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -495,7 +495,7 @@ func (s *Server) interceptBatchDecide(w http.ResponseWriter, r *http.Request) {
 		IDs      []int64 `json:"ids"`
 		Decision string  `json:"decision"` // "allowed" | "denied"
 	}
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -697,7 +697,7 @@ func (s *Server) targetGateSetExemptions(w http.ResponseWriter, r *http.Request)
 	var req struct {
 		Exemptions []db.TargetExemption `json:"exemptions"`
 	}
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -747,7 +747,7 @@ func (s *Server) interceptSetToolConfig(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		EnabledTools []string `json:"enabled_tools"`
 	}
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -772,7 +772,7 @@ func (s *Server) interceptGetJudgeConfig(w http.ResponseWriter, r *http.Request)
 // interceptSetJudgeConfig persists the judge configuration.
 func (s *Server) interceptSetJudgeConfig(w http.ResponseWriter, r *http.Request) {
 	var raw json.RawMessage
-	if err := decode(r, &raw); err != nil {
+	if err := decode(w, r, &raw); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}

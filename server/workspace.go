@@ -141,7 +141,7 @@ func (s *Server) wsWrite(w http.ResponseWriter, r *http.Request) {
 		Path    string `json:"path"`
 		Content string `json:"content"`
 	}
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -170,7 +170,7 @@ func (s *Server) wsMkdir(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
 	}
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}

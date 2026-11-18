@@ -122,7 +122,7 @@ func (s *Server) updateIntelligence(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Status string `json:"status"`
 	}
-	if err := decode(r, &req); err != nil {
+	if err := decode(w, r, &req); err != nil {
 		writeErr(w, 400, "invalid request")
 		return
 	}

@@ -38,7 +38,7 @@ func (s *Server) updateScheduleMetadata(w http.ResponseWriter, r *http.Request) 
 		Name   *string `json:"name"`
 		Remark *string `json:"remark"`
 	}
-	if err := decode(r, &request); err != nil {
+	if err := decode(w, r, &request); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			writeErr(w, 413, "request body too large")

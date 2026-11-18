@@ -339,15 +339,16 @@ type FindingDTO struct {
 	Counterevidence       string                     `json:"counterevidence,omitempty"`      // what was tested and did not work; optional
 	ConfidenceRationale   string                     `json:"confidence_rationale,omitempty"` // why the conclusion holds; optional
 
-	ID        string `json:"id"`
-	FindingID string `json:"finding_id,omitempty"` // standalone findings-table id — the handle for status updates
-	VulnClass string `json:"vulnclass"`
-	Name      string `json:"name,omitempty"` // vulnerability name; the frontend falls back to displaying vulnclass when empty
-	Severity  string `json:"severity"`       // critical | high | medium | low
-	Status    string `json:"status"`         // pending | in_progress | confirmed | resolved | fixed | false_positive | ignored | duplicate | risk_accepted
-	Summary   string `json:"summary"`
-	Evidence  string `json:"evidence"`
-	Report    string `json:"report,omitempty"` // detailed report (Markdown); returned only by the detail endpoint, empty in lists
+	ID          string `json:"id"`
+	FindingID   string `json:"finding_id,omitempty"` // standalone findings-table id — the handle for status updates
+	VulnClass   string `json:"vulnclass"`
+	Name        string `json:"name,omitempty"` // vulnerability name; the frontend falls back to displaying vulnclass when empty
+	Severity    string `json:"severity"`       // critical | high | medium | low
+	Status      string `json:"status"`         // pending | in_progress | confirmed | resolved | fixed | false_positive | ignored | duplicate | risk_accepted
+	ReportState string `json:"report_state"`   // none | submitted | accepted | rejected | duplicate; workflow stage, not a triage verdict
+	Summary     string `json:"summary"`
+	Evidence    string `json:"evidence"`
+	Report      string `json:"report,omitempty"` // detailed report (Markdown); returned only by the detail endpoint, empty in lists
 	// The conversation that wrote the report, so the UI can open that session.
 	ReportConversationID *int64 `json:"report_conversation_id,omitempty"`
 
@@ -475,6 +476,10 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 	if status == "" {
 		status = db.FindingPending
 	}
+	reportState := f.ReportState
+	if reportState == "" {
+		reportState = db.FindingReportNone
+	}
 	d := FindingDTO{
 		ID:           i64s(f.ID),
 		FindingID:    i64s(f.ID),
@@ -487,6 +492,7 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		Name:                 f.Name,
 		Severity:             f.Severity,
 		Status:               status,
+		ReportState:          reportState,
 		Summary:              f.Summary,
 		Evidence:             f.Evidence,
 		Report:               f.Report,
