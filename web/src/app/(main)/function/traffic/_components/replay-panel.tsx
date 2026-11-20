@@ -7,6 +7,7 @@ import { Loader2Icon, PlusIcon, SendIcon, XIcon } from "lucide-react";
 import { HttpCodeBlock, statusTone } from "@/components/http-code-block";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
@@ -14,6 +15,7 @@ import { ApiError, api } from "@/lib/api";
 import { parseRawRequest, splitReplayHeaders } from "@/lib/replay";
 import type { TrafficExchange, TrafficReplayHeader, TrafficReplayResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { t } from "@/i18n";
 
 type HeaderRow = TrafficReplayHeader & { key: number };
 
@@ -22,6 +24,7 @@ type ReplayForm = {
   url: string;
   rows: HeaderRow[];
   body: string;
+  applyRules: boolean;
   // Headers of the recorded request that the server would not send.
   dropped: string[];
   binary: boolean;
@@ -39,6 +42,7 @@ function initialForm(exchange: TrafficExchange, raw: string): ReplayForm {
     url: exchange.url,
     rows: toRows(sent),
     body: parsed.binary ? "" : parsed.body,
+    applyRules: false,
     dropped: notSent.filter((n) => n.toLowerCase() !== "host"),
     binary: parsed.binary,
     bodyPreviewOnly: parsed.bodyPreviewOnly,
@@ -46,18 +50,18 @@ function initialForm(exchange: TrafficExchange, raw: string): ReplayForm {
 }
 
 const ERROR_TITLES: Record<number, string> = {
-  400: "Invalid request",
-  413: "Request body too large",
-  502: "Proxy or upstream error",
-  503: "Traffic capture is disabled",
-  504: "Timed out",
+  400: t("Invalid request"),
+  413: t("Request body too large"),
+  502: t("Proxy or upstream error"),
+  503: t("Traffic capture is disabled"),
+  504: t("Timed out"),
 };
 
 // The server's message, under a title that says what the status means.
 function describeError(e: unknown): { title: string; message: string } {
   const message = e instanceof Error ? e.message : String(e);
-  if (!(e instanceof ApiError)) return { title: "Replay failed", message };
-  return { title: ERROR_TITLES[e.status] ?? `Replay failed (${e.status})`, message };
+  if (!(e instanceof ApiError)) return { title: t("Replay failed"), message };
+  return { title: ERROR_TITLES[e.status] ?? t("Replay failed ({status})", { status: e.status }), message };
 }
 
 // ReplayPanel edits the selected exchange's request and sends it again through
@@ -82,6 +86,7 @@ export function ReplayPanel({
   // Answers for an older exchange are dropped.
   const generation = React.useRef(0);
   const methodListId = React.useId();
+  const applyRulesId = React.useId();
 
   React.useEffect(() => {
     generation.current++;
@@ -110,6 +115,7 @@ export function ReplayPanel({
         headers: splitReplayHeaders(form.rows).sent,
         body: form.body,
         body_base64: false,
+        apply_rules: form.applyRules,
       })
       .then((r) => {
         if (gen !== generation.current) return;
@@ -135,7 +141,8 @@ export function ReplayPanel({
     <div className="space-y-4 p-5">
       <div className="flex gap-2">
         <Input
-          aria-label="Method"
+          aria-label={t("Method")}
+          lang="en"
           className="w-32 font-mono uppercase"
           list={methodListId}
           value={form.method}
@@ -156,42 +163,42 @@ export function ReplayPanel({
 
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <span className="font-medium text-sm">Headers</span>
+          <span className="font-medium text-sm">{t("Headers")}</span>
           <Button
             size="sm"
             variant="outline"
             onClick={() => update({ rows: [...form.rows, ...toRows([{ name: "", value: "" }])] })}
           >
             <PlusIcon />
-            Add header
+            {t("Add header")}
           </Button>
         </div>
-        <p className="text-muted-foreground text-xs">Host is taken from the URL.</p>
+        <p className="text-muted-foreground text-xs">{t("Host is taken from the URL.")}</p>
         {form.dropped.length > 0 && (
           <p className="text-muted-foreground text-xs">
-            Not sent (hop-by-hop or recomputed by the server): {form.dropped.join(", ")}
+            {t("Not sent (hop-by-hop or recomputed by the server): {headers}", { headers: form.dropped.join(", ") })}
           </p>
         )}
         {form.rows.map((row) => (
           <div key={row.key} className="flex items-center gap-2">
             <Input
-              aria-label="Header name"
+              aria-label={t("Header name")}
               className={cn("w-48 font-mono text-xs", ignored.has(row.name.trim().toLowerCase()) && "line-through")}
-              placeholder="Name"
+              placeholder={t("Name")}
               value={row.name}
               onChange={(e) => updateRow(row.key, { name: e.target.value })}
             />
             <Input
-              aria-label="Header value"
+              aria-label={t("Header value")}
               className="flex-1 font-mono text-xs"
-              placeholder="Value"
+              placeholder={t("Value")}
               value={row.value}
               onChange={(e) => updateRow(row.key, { value: e.target.value })}
             />
             <Button
               size="icon"
               variant="ghost"
-              aria-label="Remove header"
+              aria-label={t("Remove header")}
               onClick={() => update({ rows: form.rows.filter((r) => r.key !== row.key) })}
             >
               <XIcon />
@@ -199,38 +206,49 @@ export function ReplayPanel({
           </div>
         ))}
         {ignored.size > 0 && (
-          <p className="text-muted-foreground text-xs">Struck-through headers are not sent by the server.</p>
+          <p className="text-muted-foreground text-xs">{t("Struck-through headers are not sent by the server.")}</p>
         )}
       </div>
 
       <div className="space-y-2">
-        <span className="font-medium text-sm">Body</span>
+        <span className="font-medium text-sm">{t("Body")}</span>
         {form.binary ? (
           <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-amber-700 text-xs dark:text-amber-400">
-            The recorded body is binary (it contains NUL bytes). Replaying a binary body is not supported.
+            {t("The recorded body is binary (it contains NUL bytes). Replaying a binary body is not supported.")}
           </p>
         ) : (
           <>
             <Textarea
-              aria-label="Body"
+              aria-label={t("Body")}
               className="font-mono text-xs"
               value={form.body}
               onChange={(e) => update({ body: e.target.value })}
             />
             {form.bodyPreviewOnly && (
               <p className="text-amber-700 text-xs dark:text-amber-400">
-                The recorded body was too large to keep inline; only its preview is loaded, so replay is disabled for
-                this exchange.
+                {t(
+                  "The recorded body was too large to keep inline; only its preview is loaded, so replay is disabled for this exchange.",
+                )}
               </p>
             )}
           </>
         )}
       </div>
 
-      <Button onClick={send} disabled={!canSend}>
-        {sending ? <Loader2Icon className="animate-spin" /> : <SendIcon />}
-        Send
-      </Button>
+      <div className="flex flex-wrap items-center gap-4">
+        <Button onClick={send} disabled={!canSend}>
+          {sending ? <Loader2Icon className="animate-spin" /> : <SendIcon />}
+          {t("Send")}
+        </Button>
+        <label htmlFor={applyRulesId} className="flex cursor-pointer items-center gap-2 text-xs select-none">
+          <Checkbox
+            id={applyRulesId}
+            checked={form.applyRules}
+            onCheckedChange={(checked) => update({ applyRules: checked === true })}
+          />
+          <span>{t("Apply capture rewrite rules")}</span>
+        </label>
+      </div>
 
       {error && (
         <div className="space-y-1 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-xs">
@@ -246,19 +264,19 @@ export function ReplayPanel({
               {result.status}
             </Badge>
             <span className="text-muted-foreground tabular-nums">{result.duration_ms} ms</span>
-            {result.truncated && <Badge variant="outline">truncated</Badge>}
+            {result.truncated && <Badge variant="outline">{t("truncated")}</Badge>}
           </div>
           {!result.recorded && (
             <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-amber-700 text-xs dark:text-amber-400">
-              Passthrough host: the response is shown here but was not recorded.
+              {t("Passthrough host: the response is shown here but was not recorded.")}
             </div>
           )}
           {sortedHeaders.length > 0 && (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Header</TableHead>
-                  <TableHead>Value</TableHead>
+                  <TableHead>{t("Header")}</TableHead>
+                  <TableHead>{t("Value")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>

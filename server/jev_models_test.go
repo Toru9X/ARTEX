@@ -32,7 +32,7 @@ func TestJevModelListAndConnectionEndpoints(t *testing.T) {
 		}
 	}))
 	defer upstream.Close()
-	s := &Server{}
+	s := &Server{allowLoopbackModels: true} // httptest upstream is on loopback
 	for _, tc := range []struct {
 		name    string
 		handler http.HandlerFunc
@@ -58,5 +58,21 @@ func TestJevModelListAndConnectionEndpoints(t *testing.T) {
 				t.Fatalf("reply=%s", got.Reply)
 			}
 		})
+	}
+}
+
+// The jev model list goes through the same SSRF guard as the other providers.
+func TestJevModelListRefusesPrivateBaseURL(t *testing.T) {
+	for _, base := range []string{"http://169.254.169.254/latest", "http://127.0.0.1:1/v1/systemone"} {
+		payload, _ := json.Marshal(map[string]any{"provider": "jev", "base_url": base, "api_key": "test-key"})
+		w := httptest.NewRecorder()
+		(&Server{}).pgListModels(w, httptest.NewRequest(http.MethodPost, "/api/llm/models", strings.NewReader(string(payload))))
+		var got struct {
+			OK    bool   `json:"ok"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.OK || !strings.Contains(got.Error, "not allowed") {
+			t.Fatalf("base=%s response=%s", base, w.Body)
+		}
 	}
 }

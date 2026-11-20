@@ -16,6 +16,7 @@ import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/in
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { t } from "@/i18n";
 import { api } from "@/lib/api";
 import { SEVERITY_FILTER_OPTIONS } from "@/lib/status";
 import type { Finding, FindingsPage, Severity } from "@/lib/types";
@@ -23,7 +24,7 @@ import type { Finding, FindingsPage, Severity } from "@/lib/types";
 const PAGE_SIZE = 20;
 
 function findingLabel(finding: Finding) {
-  return finding.name?.trim() || finding.vulnclass.trim() || "Uncategorized";
+  return finding.name?.trim() || finding.vulnclass.trim() || t("Uncategorized");
 }
 
 export function RetestsTab({ taskId }: { taskId: string }) {
@@ -133,9 +134,9 @@ export function RetestsTab({ taskId }: { taskId: string }) {
       {error ? (
         <Alert variant="destructive">
           <AlertDescription>
-            Failed to load task vulnerabilities: {error}
+            {t("Failed to load task vulnerabilities: {error}", { error })}
             <Button variant="outline" size="sm" onClick={refresh}>
-              Retry
+              {t("Retry")}
             </Button>
           </AlertDescription>
         </Alert>
@@ -143,9 +144,9 @@ export function RetestsTab({ taskId }: { taskId: string }) {
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)]">
         <Card className="min-w-0">
           <CardHeader>
-            <CardTitle>Select a vulnerability{loaded ? ` · ${data.total}` : ""}</CardTitle>
+            <CardTitle>{t("Select a vulnerability")}{loaded ? ` · ${data.total}` : ""}</CardTitle>
             <CardDescription>
-              View retest history for this task's vulnerabilities, or start a new retest.
+              {t("View retest history for this task's vulnerabilities, or start a new retest.")}
             </CardDescription>
           </CardHeader>
           <CardContent className="flex max-h-[32rem] flex-col overflow-y-auto">
@@ -156,7 +157,7 @@ export function RetestsTab({ taskId }: { taskId: string }) {
                 <Button
                   variant={finding.id === selectedId ? "secondary" : "ghost"}
                   className="h-auto w-full shrink-0 flex-col items-start gap-2 whitespace-normal py-3 text-left"
-                  aria-label={`Select vulnerability: ${findingLabel(finding)}`}
+                  aria-label={t("Select vulnerability: {name}", { name: findingLabel(finding) })}
                   aria-pressed={finding.id === selectedId}
                   onClick={() => setSelectedId(finding.id)}
                 >
@@ -172,12 +173,12 @@ export function RetestsTab({ taskId }: { taskId: string }) {
               <Empty>
                 <EmptyHeader>
                   <EmptyTitle>
-                    {hasFilters ? "No vulnerabilities match these filters" : "No vulnerabilities to retest"}
+                    {hasFilters ? t("No vulnerabilities match these filters") : t("No vulnerabilities to retest")}
                   </EmptyTitle>
                   <EmptyDescription>
                     {hasFilters
-                      ? "Adjust the severity or the search keyword."
-                      : "Once this task discovers vulnerabilities, you can manually start a retest here."}
+                      ? t("Adjust the severity or the search keyword.")
+                      : t("Once this task discovers vulnerabilities, you can manually start a retest here.")}
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
@@ -188,19 +189,19 @@ export function RetestsTab({ taskId }: { taskId: string }) {
               <Button
                 variant="outline"
                 size="icon-sm"
-                aria-label="Previous page of vulnerabilities"
+                aria-label={t("Previous page of vulnerabilities")}
                 disabled={page === 1}
                 onClick={() => setPage(page - 1)}
               >
                 <ChevronLeftIcon />
               </Button>
               <span className="text-muted-foreground text-xs">
-                Page {page} / {Math.ceil(data.total / PAGE_SIZE)}
+                {t("Page {page} / {total}", { page, total: Math.ceil(data.total / PAGE_SIZE) })}
               </span>
               <Button
                 variant="outline"
                 size="icon-sm"
-                aria-label="Next page of vulnerabilities"
+                aria-label={t("Next page of vulnerabilities")}
                 disabled={page * PAGE_SIZE >= data.total}
                 onClick={() => setPage(page + 1)}
               >
@@ -216,7 +217,7 @@ export function RetestsTab({ taskId }: { taskId: string }) {
                 <h2 className="min-w-0 flex-1 break-words font-medium">{findingLabel(selected)}</h2>
                 <Button asChild variant="ghost" size="sm">
                   <Link href={`/function/findings/detail?id=${selected.finding_id || selected.id}`}>
-                    Vulnerability details <ArrowUpRightIcon data-icon="inline-end" />
+                    {t("Vulnerability details")} <ArrowUpRightIcon data-icon="inline-end" />
                   </Link>
                 </Button>
               </div>

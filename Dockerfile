@@ -318,9 +318,14 @@ COPY --from=build /out/artex /app/artex
 # to artex — docker stop only signals PID 1; without forwarding, artex never receives it,
 # cannot shut down gracefully, and is hard-killed by SIGKILL after 10 seconds.
 COPY start.sh /app/start.sh
-RUN chmod +x /app/artex /app/start.sh \
-    && mkdir -p /app/data /app/keys /app/.playwright \
-    && printf '%s\n' '{"browser":{"browserName":"chromium","launchOptions":{"args":["--no-sandbox"]}}}' > /app/.playwright/cli.config.json
+RUN chmod +x /app/artex /app/start.sh && mkdir -p -m 0700 /app/keys \
+    && mkdir -p /app/data /app/.playwright \
+    && printf '%s\n' '{"browser":{"browserName":"chromium","launchOptions":{"args":["--no-sandbox"]}}}' > /app/.playwright/cli.config.json \
+    && chmod 0711 /root
+# No setuid or setgid programs (su, passwd, mount, bbot's chrome_sandbox, ...): an
+# agent process runs as the executor and must not regain root through one, even
+# when the container runs without docker-compose.yml's no-new-privileges.
+RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} +
 COPY skills/ /app/skills/
 # persistence points: data/ (traffic index, task files, transcripts) and keys/ (jwt.key, secret.key, via ARTEX_JWT_KEY_DIR)
 VOLUME ["/app/data", "/app/keys"]

@@ -71,7 +71,7 @@ jobs:
           ARTEX_PG_DSN: postgres://artex:testpass@localhost:5432/artextest_race?sslmode=disable
 
         run: >-
-          go test -race -p 1 ./agent ./cmd/artex ./config ./db ./evidence ./guard
+          go test -race -p 1 ./agent ./archivestore ./cmd/artex ./config ./db ./evidence ./guard
           ./intercept ./llmpool ./llmrec ./mcphttp ./notify ./server ./sidequestion
           ./traffic ./traffic/rewrite
 
@@ -125,7 +125,7 @@ jobs:
       # shellcheck is preinstalled on the ubuntu runners. -S warning: the scripts
       # currently have only info-level notes (intentional A && B || C chains in
       # update.sh, an unquoted glob in backup.sh's prune), so fail on warnings.
-      - run: shellcheck -S warning install.sh update.sh start.sh scripts/backup.sh reset-password.sh scripts/extract-changelog-section.sh scripts/test-extract-changelog-section.sh .github/scripts/bot.sh scripts/test-bot-context.sh
+      - run: shellcheck -S warning install.sh update.sh start.sh scripts/backup.sh scripts/verify.sh reset-password.sh scripts/extract-changelog-section.sh scripts/test-extract-changelog-section.sh .github/scripts/bot.sh scripts/test-bot-context.sh
       - run: bash scripts/test-extract-changelog-section.sh
       # The triage bot's repository summary must expose every top-level
       # directory; a truncated file list once made it deny that docs/ and
@@ -149,6 +149,7 @@ jobs:
       - run: npm run test:polling
       - run: npm run test:replay
       - run: npm run test:upload
+      - run: npm run test:i18n
       - run: npm run build:static
 
   python:

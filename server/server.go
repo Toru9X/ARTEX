@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -53,6 +54,8 @@ type Server struct {
 
 	scrubSecrets bool // drop ARTEX_PG_DSN and the API keys from the environment once read (binary only)
 
+	execPriv ExecPrivilege // identity agent processes run under; zero keeps the server's own
+
 	setupMu    sync.Mutex
 	setupToken string // one-time token POST /api/auth/init requires; empty when none is active
 	// pwdVersion is auth.password_version, a counter. Zero means no password
@@ -65,6 +68,14 @@ type Server struct {
 	// the production keys. Tests set unique keys so a shared database is left alone.
 	authHashKey    string
 	authVersionKey string
+
+	// Test-only seams for pgListModels SSRF checks. All remain zero/nil in
+	// production (strict public-only default; only exact host:port entries in
+	// ARTEX_LLM_PRIVATE_ENDPOINTS may resolve to private addresses).
+	allowLoopbackModels bool
+	modelLookupIP       func(ctx context.Context, host string) ([]netip.Addr, error)
+	modelDialContext    func(ctx context.Context, network, addr string) (net.Conn, error)
+	modelRootCAs        *x509.CertPool
 
 	loginLimit     *loginLimiter  // per-IP attempt limit on POST /api/auth/login
 	pwdLimit       *loginLimiter  // attempt limit on POST /api/auth/change-password (IP + session token)
@@ -96,6 +107,8 @@ type Server struct {
 	// scheduler tick and an HTTP settings change / task creation can't both count
 	// free slots off the same snapshot and over-promote past the limit.
 	concMu sync.Mutex
+
+	readyPG readyCache
 
 	cfgMu     sync.Mutex
 	chatAgent *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
@@ -299,7 +312,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			}
 			return a.TaskTimeoutWrapupMaxTurns, true
 		})
-		wireAgentAugment(m.pg, s.skillDir, s.hostTools) // wire visible skills/MCP + traffic/orchestration host tools into the agent toolset
+		wireAgentAugment(m.pg, s.skillDir, s.hostTools, s.execPriv) // wire visible skills/MCP + traffic/orchestration host tools into the agent toolset
 		domainReg := buildDomainReg(m.Assets())
 		wireTools(m.pg, domainReg)   // built-in tools table: filter per agent + override description/schema + inject defaults
 		seedPrompts(m.pg)            // seed built-in agent default prompt bodies into agent_prompts (only when empty)
@@ -806,6 +819,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/settings/basic-auth", s.saveBasicAuthSettings)
 
 	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("GET /api/ready", s.ready)
 	mux.HandleFunc("GET /api/stats", s.stats)
 	mux.HandleFunc("GET /api/system/metrics", s.systemMetrics)
 	mux.HandleFunc("GET /api/logs", s.getLogs)
@@ -1167,7 +1181,14 @@ func (s *Server) Handler() http.Handler {
 	api := cors(s.requireAuth(mux))
 	root := http.NewServeMux()
 	root.Handle("/api/", api)
-	root.Handle("/", s.webuiHandler())
+	webui := s.webuiHandler()
+	root.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Keep the operator console out of cross-origin frames and referrers.
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'self'")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		webui.ServeHTTP(w, r)
+	})
 	return s.requireBasicAuth(limitRequestBody(root))
 }
 
@@ -3699,23 +3720,24 @@ func taskActivityDetail(t *Task, seq int64) (string, error) {
 func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request) {
 	tr := s.m.Traffic()
 	if tr == nil {
-		writeJSON(w, 200, map[string]any{"enabled": false, "exchanges": []any{}})
+		writeJSON(w, 200, map[string]any{"enabled": false, "exchanges": []any{}, "rewrite": traffic.RewriteStats{}})
 		return
 	}
 	q := r.URL.Query()
 	page := atoiDefault(q.Get("page"), 0)
 	size := atoiDefault(q.Get("size"), 100)
 	ex, matched, _ := tr.Page(traffic.PageQuery{
-		Host:    q.Get("host"),
-		Method:  q.Get("method"),
-		Query:   q.Get("q"),
-		Body:    q.Get("body"),
-		Path:    q.Get("path"),
-		Status:  q.Get("status"),
-		RespMin: int64(atoiDefault(q.Get("resp_min"), -1)),
-		RespMax: int64(atoiDefault(q.Get("resp_max"), -1)),
-		Sort:    q.Get("sort"),
-		Order:   q.Get("order"),
+		Host:      q.Get("host"),
+		Method:    q.Get("method"),
+		Query:     q.Get("q"),
+		Body:      q.Get("body"),
+		Path:      q.Get("path"),
+		Status:    q.Get("status"),
+		Rewritten: q.Get("rewritten"),
+		RespMin:   int64(atoiDefault(q.Get("resp_min"), -1)),
+		RespMax:   int64(atoiDefault(q.Get("resp_max"), -1)),
+		Sort:      q.Get("sort"),
+		Order:     q.Get("order"),
 	}, page, size)
 	count, _ := tr.Count() // global total, for the stat card
 	writeJSON(w, 200, map[string]any{
@@ -3726,6 +3748,7 @@ func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request) {
 		"page":      page,
 		"size":      size,
 		"exchanges": trafficDTOs(ex),
+		"rewrite":   tr.RewriteStats(),
 	})
 }
 
@@ -3875,7 +3898,8 @@ func (s *Server) getTrafficExchange(w http.ResponseWriter, r *http.Request) {
 }
 
 // getTrafficStream returns one page of a WebSocket/SSE exchange's messages in
-// order (limit 1..200, default 50).
+// order (limit 1..200, default 50). direction=c2s or s2c keeps one side of the
+// conversation (plus the meta limit marker); any other non-empty value is a 400.
 func (s *Server) getTrafficStream(w http.ResponseWriter, r *http.Request) {
 	tr := s.m.Traffic()
 	if tr == nil {
@@ -3890,7 +3914,12 @@ func (s *Server) getTrafficStream(w http.ResponseWriter, r *http.Request) {
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	msgs, total, err := tr.StreamMessages(id, offset, limit)
+	direction := strings.ToLower(strings.TrimSpace(q.Get("direction")))
+	msgs, total, err := tr.StreamMessagesByDirection(id, direction, offset, limit)
+	if errors.Is(err, traffic.ErrBadStreamDirection) {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -3922,6 +3951,7 @@ func (s *Server) replayTraffic(w http.ResponseWriter, r *http.Request) {
 		Headers    []traffic.ReplayHeader `json:"headers"`
 		Body       string                 `json:"body"`
 		BodyBase64 bool                   `json:"body_base64"`
+		ApplyRules bool                   `json:"apply_rules"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		var tooLarge *http.MaxBytesError
@@ -3943,7 +3973,13 @@ func (s *Server) replayTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	res, err := tr.Replay(ctx, traffic.ReplayRequest{Method: body.Method, URL: body.URL, Headers: body.Headers, Body: payload})
+	res, err := tr.Replay(ctx, traffic.ReplayRequest{
+		Method:     body.Method,
+		URL:        body.URL,
+		Headers:    body.Headers,
+		Body:       payload,
+		ApplyRules: body.ApplyRules,
+	})
 	switch {
 	case errors.Is(err, traffic.ErrReplayTooLarge):
 		writeErr(w, 413, err.Error())
@@ -4738,9 +4774,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			maTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 			resume := func() { s.reviveTask(t) } // set_goals added a goal → pulls the task back to running
 			// Splice the list of [absolute paths] of uploaded attachments into the message sent to the agent; it uses them to open files via Read/Bash.
-			// taskDir = the agent's working directory (CWD), consistent with chatUpload's target dir and ensureRunDir.
-			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
-			agentMsg := composeAgentMessage(agentMessage, req.Attachments, taskDir)
+			// mainDir = the main agent's run directory (its CWD, tasks/<id>/main), the same call as chatUpload's target dir and the agent itself.
+			mainDir := agent.EnsureRunDir(s.m.dir, maTaskID, 0)
+			agentMsg := composeAgentMessage(agentMessage, req.Attachments, mainDir)
 			// Tag the turn for the target gate: the task, the "mainagent" lane and the approval scope.
 			gctx := intercept.WithTaskContext(ctx, t.ID, "mainagent", func(a db.Activity) {
 				a.Worker = "mainagent"

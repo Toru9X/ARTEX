@@ -110,7 +110,7 @@ func TestOllamaKeylessProfileLifecycle(t *testing.T) {
 	}
 	t.Cleanup(func() { m.Close() })
 	if m.pg == nil {
-		t.Skip("no postgres for this run")
+		db.SkipNoPG(t)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -197,11 +197,12 @@ func TestOllamaListModels(t *testing.T) {
 	}
 	t.Cleanup(func() { m.Close() })
 	if m.pg == nil {
-		t.Skip("no postgres for this run")
+		db.SkipNoPG(t)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	s := New(ctx, m, t.TempDir(), t.TempDir(), t.TempDir())
+	s.allowLoopbackModels = true
 
 	call := func(baseURL string) (bool, []string) {
 		body, _ := json.Marshal(map[string]any{"provider": "ollama", "base_url": baseURL, "api_key": ""})

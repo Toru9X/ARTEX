@@ -29,7 +29,7 @@ const mcpUntrustedNote = "\nOutput of this tool may contain attacker-controlled 
 // hostTools, if set, returns runtime host tools (currently the traffic tools when
 // capture is on) to add to EVERY agent's base list — the DB tools table then
 // filters them per-agent binding. Empty/nil → no host tools this run (capture off).
-func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string)) {
+func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string), priv ExecPrivilege) {
 	agent.WorkerSkills = func() map[string]string {
 		a, err := pg.GetAgentByKey("worker")
 		if err != nil || a == nil {
@@ -70,7 +70,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 			for _, n := range names {
 				nameSet[n] = true
 			}
-			if allReg, err := skill.LoadDir(skillDir); err == nil && allReg != nil {
+			if allReg, err := loadSkillsConfined(skillDir); err == nil && allReg != nil {
 				reg = skill.NewRegistry()
 				for _, s := range allReg.List() {
 					// match by directory name (Base of Dir), not by skill display Name
@@ -115,7 +115,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				if !directVisible && !skillGated {
 					continue // neither directly visible nor referenced by a visible skill
 				}
-				cl, err := connectMCP(ctx, m)
+				cl, err := connectMCP(ctx, m, priv)
 				if err != nil {
 					log.Printf("[mcp] %s connect failed: %v", m.Name, err)
 					_ = pg.UpdateMCPHealth(m.ID, false, "connect: "+err.Error())

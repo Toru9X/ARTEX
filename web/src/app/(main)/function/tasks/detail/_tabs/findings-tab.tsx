@@ -16,6 +16,7 @@ import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/in
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { usePoll } from "@/hooks/use-poll";
+import { intlLocale, t } from "@/i18n";
 import { api } from "@/lib/api";
 import { type FindingSortField, filterAndSortFindings } from "@/lib/finding-severity";
 import { useStoredSortPreference } from "@/lib/sort-preference";
@@ -30,7 +31,7 @@ const FINDING_SORT_PREFERENCE_KEY = "artex_task_findings_sort";
 function findingLabel(finding: Finding): string {
   if (finding.name?.trim()) return finding.name;
   if (finding.vulnclass?.trim()) return finding.vulnclass;
-  return "Uncategorized";
+  return t("Uncategorized");
 }
 
 const FINDING_STATUSES: FindingStatus[] = [
@@ -72,14 +73,14 @@ function Row({
               <span className="truncate font-medium">{findingLabel(f)}</span>
               {f.inherited && f.source_task_id && (
                 <Badge variant="outline" className="shrink-0">
-                  Source #{f.source_task_id} · read-only
+                  {t("Source #{id} · read-only", { id: f.source_task_id })}
                 </Badge>
               )}
             </div>
             <span className="truncate text-xs text-muted-foreground">{f.summary}</span>
           </div>
         </button>
-        <Badge variant="outline">Traffic evidence {f.traffic_count ?? 0}</Badge>
+        <Badge variant="outline">{t("Traffic evidence {count}", { count: f.traffic_count ?? 0 })}</Badge>
         {f.assets && f.assets.length > 0 && (
           <div className="hidden shrink-0 flex-wrap justify-end gap-1 sm:flex">
             {f.assets.slice(0, 2).map((a) => (
@@ -113,7 +114,7 @@ function Row({
           <StatusBadge domain="finding" value={f.status} dot />
         )}
         <span className="hidden shrink-0 text-xs text-muted-foreground md:block">
-          {new Date(f.ts).toLocaleString("zh-CN")}
+          {new Date(f.ts).toLocaleString(intlLocale)}
         </span>
         {f.finding_id && (
           <Link
@@ -123,16 +124,16 @@ function Row({
                 : `/function/findings/detail?id=${f.finding_id}`
             }
             className="text-muted-foreground hover:text-primary inline-flex shrink-0 items-center gap-0.5 text-xs"
-            title="View vulnerability details"
+            title={t("View vulnerability details")}
           >
-            Details
+            {t("Details")}
             <ArrowUpRightIcon className="size-3" />
           </Link>
         )}
       </div>
       {open && (
         <div className="bg-muted/30 px-4 pb-4 pl-11">
-          <div className="mb-1 text-xs font-medium text-muted-foreground">Evidence / PoC</div>
+          <div className="mb-1 text-xs font-medium text-muted-foreground">{t("Evidence / PoC")}</div>
           <pre className="overflow-auto rounded-md border bg-background p-3 font-mono text-xs whitespace-pre-wrap">
             {f.evidence}
           </pre>
@@ -180,10 +181,10 @@ export function FindingsTab({ taskId }: { taskId: string }) {
     setFindings((cur) => cur.map((x) => (x.id === f.id ? { ...x, status: next } : x)));
     try {
       await api.setFindingStatus(f.finding_id, next);
-      toast.success(`Marked as "${statusMeta("finding", next).label}"`);
+      toast.success(t("Marked as \"{status}\"", { status: statusMeta("finding", next).label }));
     } catch (e) {
       setFindings((cur) => cur.map((x) => (x.id === f.id ? { ...x, status: prev } : x)));
-      toast.error("Update failed: " + (e as Error).message);
+      toast.error(t("Update failed: {error}", { error: (e as Error).message }));
     }
   }, []);
 
@@ -311,7 +312,7 @@ export function FindingsTab({ taskId }: { taskId: string }) {
               </span>
               <span className="inline-flex items-center gap-1">
                 <span>
-                  {sortPreference.field === "severity" ? "Discovery time within a severity" : "Discovery time"}
+                  {sortPreference.field === "severity" ? "Discovery time within a severity" : t("Discovery time")}
                 </span>
                 {sortPreference.direction === "asc" ? (
                   <ArrowUpIcon className="size-3.5" />
@@ -327,7 +328,7 @@ export function FindingsTab({ taskId }: { taskId: string }) {
               <p className="px-4 py-8 text-center text-sm text-muted-foreground">
                 {severity !== "all" || query
                   ? "No original reports match the current filters."
-                  : "No confirmed findings yet for this task or its directly linked tasks."}
+                  : t("No confirmed findings yet for this task or its directly linked tasks.")}
               </p>
             )}
           </CardContent>

@@ -30,6 +30,7 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { t } from "@/i18n";
 import { cn } from "@/lib/utils";
 import type {
   NavBadge,
@@ -322,7 +323,7 @@ function NavItemBadge({ badge }: { badge?: NavBadge }) {
         badge === "soon" && "border-muted-foreground text-muted-foreground",
       )}
     >
-      {badge}
+      {t(badge)}
     </SidebarMenuBadge>
   );
 }

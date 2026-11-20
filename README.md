@@ -428,6 +428,14 @@ runtime supports it.
 `/chat/completions` (or `/responses` for `openai-responses`), so their base **does** end in `/v1`
 (for example `https://api.openai.com/v1`).
 
+**OpenAI-compatible gateways**: any provider that serves an OpenAI-style
+`/v1/chat/completions` endpoint works through the **OpenAI** format — no dedicated format
+needed. Create a profile with format **OpenAI**, set **Base URL** to the gateway's `/v1`
+root, paste the key, then click the **↻** button next to *Model* to load the provider's
+catalog (`GET /v1/models`) and pick a model; models the provider adds later appear on the
+next refresh. For example, [NotHoly](https://notholy.com) (offensive-security models) uses
+base URL `https://api.notholy.com/v1` with an API key from its console.
+
 **Concurrency**: work agents per task, in "System Settings" (default 3).
 
 **Untrusted-output boundary (on by default)**: tool results for the worker, planner, chat and main
@@ -651,6 +659,7 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 - Backend: `go run ./cmd/artex` (without `-tags embedui`, the frontend is not embedded)
 - Frontend: `cd web && npm run dev` (`/api` is reverse-proxied to the backend, with hot reload)
 - Tests: `go test ./...`
+- Reproduce all CI checks locally: `./scripts/verify.sh` (add `--full` for `-race` and the static web build)
 - Mock preview (no backend): `cd web && NEXT_PUBLIC_MOCK=1 npm run dev`
 
 ---
@@ -717,6 +726,10 @@ flowchart TB
 | **agent** | goals / planner / worker / mainagent; `ToolSet` exposes the dual graphs as LLM tools |
 | **db** | PostgreSQL persistence (pgx); embedded schema and numbered migrations applied at startup |
 | **Supporting** | Recording MITM proxy, approval gate, async enrichment, MCP/skills/memory/report |
+
+For the code-level map (execution flow, trust boundaries, decisions) see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); for startup, configuration precedence,
+backup and key rotation see [docs/OPS.md](docs/OPS.md).
 
 ---
 

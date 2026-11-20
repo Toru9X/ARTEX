@@ -25,6 +25,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
+import { t } from "@/i18n";
+import { statusMeta } from "@/lib/status";
 import type { CoverageAssetRef, CoverageAssetRefs, CoverageGraphEdge, CoverageGraphNode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -72,13 +74,13 @@ function zoneOf(node: CoverageGraphNode): Zone {
 type KindMeta = { label: string; icon: LucideIcon; iconBg: string; hex: string; size: number };
 
 const kindMeta: Record<Kind, KindMeta> = {
-  company: { label: "Company", icon: Building2, iconBg: "bg-slate-500", hex: "#64748b", size: 46 },
-  root_domain: { label: "Root domain", icon: Globe, iconBg: "bg-indigo-500", hex: "#6366f1", size: 38 },
-  subdomain: { label: "Subdomain", icon: Waypoints, iconBg: "bg-blue-500", hex: "#3b82f6", size: 30 },
+  company: { label: t("Company"), icon: Building2, iconBg: "bg-slate-500", hex: "#64748b", size: 46 },
+  root_domain: { label: t("Root domain"), icon: Globe, iconBg: "bg-indigo-500", hex: "#6366f1", size: 38 },
+  subdomain: { label: t("Subdomain"), icon: Waypoints, iconBg: "bg-blue-500", hex: "#3b82f6", size: 30 },
   ip: { label: "IP", icon: Server, iconBg: "bg-cyan-600", hex: "#0891b2", size: 28 },
-  service: { label: "Service", icon: Radio, iconBg: "bg-amber-500", hex: "#f59e0b", size: 26 },
-  app: { label: "App", icon: AppWindow, iconBg: "bg-fuchsia-500", hex: "#d946ef", size: 26 },
-  endpoint: { label: "Endpoint", icon: Link2, iconBg: "bg-rose-500", hex: "#f43f5e", size: 20 },
+  service: { label: t("Service"), icon: Radio, iconBg: "bg-amber-500", hex: "#f59e0b", size: 26 },
+  app: { label: t("App"), icon: AppWindow, iconBg: "bg-fuchsia-500", hex: "#d946ef", size: 26 },
+  endpoint: { label: t("Endpoint"), icon: Link2, iconBg: "bg-rose-500", hex: "#f43f5e", size: 20 },
 };
 
 // G6 node icons use the platform's own lucide icons: the lucide SVG paths (v1.22) are
@@ -397,7 +399,7 @@ function toG6Nodes(renderNodes: RenderNode[], activeKeys: Set<string>, viewMode:
         fold: true,
         tested: false,
         inScope: false,
-        lbl: `${rn.hidden.length} more ${kindMeta[rn.kind].label}`,
+        lbl: t("{count} more {kind}", { count: rn.hidden.length, kind: kindMeta[rn.kind].label }),
         size: 24,
         active: activeKeys.has(rn.key),
         iconSrc: FOLD_ICON,
@@ -480,11 +482,15 @@ function RefList({ title, items }: { title: string; items: CoverageAssetRef[] })
             className="flex flex-wrap items-start gap-2 rounded-md bg-muted/50 px-2 py-1.5 text-xs"
           >
             <span className="shrink-0 font-mono text-muted-foreground">#{r.id}</span>
-            {r.state && <span className="shrink-0 text-muted-foreground">{r.state}</span>}
+            {r.state && (
+              <span className="shrink-0 text-muted-foreground">
+                {statusMeta(r.kind === "intent" ? "intent" : "node", r.state).label}
+              </span>
+            )}
             <span className="min-w-32 flex-1 break-words text-foreground">{r.summary || "—"}</span>
             {r.inherited && r.source_task_id && (
               <Badge variant="outline" className="shrink-0">
-                Source #{r.source_task_id} · read-only
+                {t("Source #{id} · read-only", { id: r.source_task_id })}
               </Badge>
             )}
           </div>
@@ -547,12 +553,12 @@ function AssetSheet({
             <ScrollArea className="min-h-0 flex-1">
               <div className="flex w-full min-w-0 flex-col gap-4 p-4">
                 <section>
-                  <h4 className="text-muted-foreground mb-1 text-xs font-medium">Properties</h4>
+                  <h4 className="text-muted-foreground mb-1 text-xs font-medium">{t("Properties")}</h4>
                   <DetailRow label="Kind">{meta.label}</DetailRow>
-                  <DetailRow label="Test status">
+                  <DetailRow label={t("Test status")}>
                     {node.in_scope ? (
                       node.tested ? (
-                        <span className="text-emerald-600 dark:text-emerald-400">Tested</span>
+                        <span className="text-emerald-600 dark:text-emerald-400">{t("Tested")}</span>
                       ) : (
                         <span className="text-neutral-500">Not tested</span>
                       )
@@ -560,17 +566,17 @@ function AssetSheet({
                       <span className="text-neutral-400">Out of scope (link node)</span>
                     )}
                   </DetailRow>
-                  <DetailRow label="Domain">{node.domain}</DetailRow>
-                  <DetailRow label="Root domain">{node.root_domain}</DetailRow>
+                  <DetailRow label={t("Domain")}>{node.domain}</DetailRow>
+                  <DetailRow label={t("Root domain")}>{node.root_domain}</DetailRow>
                   <DetailRow label="IP">{node.ip}</DetailRow>
-                  <DetailRow label="Port">{node.port ? node.port : undefined}</DetailRow>
+                  <DetailRow label={t("Port")}>{node.port ? node.port : undefined}</DetailRow>
                   <DetailRow label="URL">
                     {node.url ? <span className="font-mono text-xs break-all">{node.url}</span> : undefined}
                   </DetailRow>
-                  <DetailRow label="Title">{node.page_title}</DetailRow>
-                  <DetailRow label="Status code">{node.status_code ? node.status_code : undefined}</DetailRow>
-                  <DetailRow label="App">{node.app_name}</DetailRow>
-                  <DetailRow label="Asset ID">
+                  <DetailRow label={t("Title")}>{node.page_title}</DetailRow>
+                  <DetailRow label={t("Status code")}>{node.status_code ? node.status_code : undefined}</DetailRow>
+                  <DetailRow label={t("App")}>{node.app_name}</DetailRow>
+                  <DetailRow label={t("Asset ID")}>
                     {node.asset_id ? <span className="font-mono text-xs">{node.asset_id}</span> : undefined}
                   </DetailRow>
                 </section>
@@ -582,7 +588,7 @@ function AssetSheet({
                   </section>
                 )}
                 <section className="border-t pt-3">
-                  <h4 className="text-muted-foreground mb-1.5 text-xs font-medium">Raw data</h4>
+                  <h4 className="text-muted-foreground mb-1.5 text-xs font-medium">{t("Raw data")}</h4>
                   <pre className="bg-muted/50 text-foreground max-w-full overflow-hidden rounded-md border p-3 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap">
                     {raw}
                   </pre>
@@ -616,7 +622,7 @@ function FoldSheet({
           <>
             <SheetHeader className="border-b p-4">
               <SheetTitle className="text-base">
-                Hidden {meta.label} ({fold.hidden.length})
+                {t("Hidden {kind} ({count})", { kind: meta.label, count: fold.hidden.length })}
               </SheetTitle>
               <p className="text-muted-foreground text-xs">
                 Tested assets come first. "Show more" pulls the next batch into the graph.
@@ -649,7 +655,7 @@ function FoldSheet({
             </ScrollArea>
             <div className="border-t p-3">
               <Button className="w-full" variant="outline" onClick={() => onShowMore(fold.groupId)}>
-                Show more (+{FOLD_STEP})
+                {t("Show more (+{count})", { count: FOLD_STEP })}
               </Button>
             </div>
           </>
@@ -1064,7 +1070,7 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
           </div>
           {total > 0 ? (
             <span className="text-muted-foreground whitespace-nowrap">
-              In scope <span className="text-foreground font-semibold tabular-nums">{inScope}</span>
+              {t("In scope")} <span className="text-foreground font-semibold tabular-nums">{inScope}</span>
               {coverageEnabled && (
                 <>
                   {" "}
@@ -1075,7 +1081,7 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
             </span>
           ) : (
             <span className="text-muted-foreground">
-              {loading ? "Loading…" : "No in-scope assets yet (anchor the task scope first)"}
+              {loading ? t("Loading…") : t("No in-scope assets yet (anchor the task scope first)")}
             </span>
           )}
           {!panelCollapsed && (
@@ -1183,8 +1189,8 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
                 </>
               )}
               <span className="inline-flex items-center gap-1.5">
-                <span className="size-3 rounded-full border border-dashed border-neutral-400 bg-neutral-200" /> Out of
-                scope
+                <span className="size-3 rounded-full border border-dashed border-neutral-400 bg-neutral-200" />{" "}
+                {t("Out of scope")}
               </span>
             </div>
             {viewMode === "network" && (

@@ -519,8 +519,11 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		log.Printf("[llmusage] create table: %v", err)
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
-	// Behind the global egress proxy a target approval is name-only.
-	m.interceptor.SetUpstreamProxyCheck(func() bool { return m.GlobalProxy() != "" })
+	// Behind any proxy in the path (the recording proxy, the global egress proxy,
+	// or a custom tool's own proxy) the proxy chooses the address, so a target
+	// approval is name-only.
+	m.interceptor.SetUpstreamProxyCheck(func() bool { return m.ProxyAddr() != "" })
+	m.interceptor.SetToolProxyCheck(m.toolUsesProxy)
 	// The platform's own endpoints need no target approval.
 	m.interceptor.SetDerivedExemptions(m.targetGateEndpoints)
 	// A stable, credential-free local address agents can be handed once. Each
@@ -1059,6 +1062,36 @@ func (m *Manager) ProxyAddr() string {
 	// No forwarder (its listener failed to start): hand back the real value, as
 	// before this feature existed. Masking here would guarantee a broken proxy.
 	return global
+}
+
+// toolUsesProxy reports whether a custom tool's own configuration sends its
+// traffic through a proxy. That call cannot enforce an approved IP, so the
+// target gate treats its pins as name-only. A recording-proxy tool is also
+// covered by ProxyAddr() when capture is on; the per-tool check covers a
+// tool-specific proxy while capture is off.
+func (m *Manager) toolUsesProxy(key string) bool {
+	if m.pg == nil {
+		return false
+	}
+	t, err := m.pg.GetTool(key)
+	if err != nil {
+		// A failed read cannot prove the call is direct; treat it as proxied.
+		return true
+	}
+	if t == nil || t.Kind != "http" {
+		return false
+	}
+	var spec struct {
+		Proxy             string `json:"proxy"`
+		UseRecordingProxy bool   `json:"use_recording_proxy"`
+	}
+	if json.Unmarshal(t.Exec, &spec) != nil {
+		return false
+	}
+	if strings.TrimSpace(spec.Proxy) != "" {
+		return true
+	}
+	return spec.UseRecordingProxy && m.ProxyAddr() != ""
 }
 
 // ProxyCACert returns the CA cert path agents must trust to verify HTTPS through
@@ -2313,17 +2346,19 @@ type taskFileDeleteStage struct {
 	done     bool
 }
 
-// stageTaskFiles atomically renames the task workspace and owned transcripts to
-// a same-filesystem staging directory. The trailing dash in the transcript
-// prefix is significant: exploration 12 must not match exploration 123.
+// stageTaskFiles atomically renames the task workspace, its command-output spill
+// directory and owned transcripts to a same-filesystem staging directory. The
+// trailing dash in the transcript prefix is significant: exploration 12 must not
+// match exploration 123.
 func stageTaskFiles(dataDir, taskID string, explorationID int64) (*taskFileDeleteStage, error) {
 	stage := &taskFileDeleteStage{}
 	var targets []string
-	taskDir := filepath.Join(dataDir, "tasks", taskID)
-	if _, err := os.Lstat(taskDir); err == nil {
-		targets = append(targets, taskDir)
-	} else if !os.IsNotExist(err) {
-		return nil, err
+	for _, dir := range []string{filepath.Join(dataDir, "tasks", taskID), agent.TaskSpillDir(dataDir, taskID)} {
+		if _, err := os.Lstat(dir); err == nil {
+			targets = append(targets, dir)
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
 	}
 
 	transcriptDir := filepath.Join(dataDir, "transcripts")

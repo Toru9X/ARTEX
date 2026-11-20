@@ -175,6 +175,7 @@ type TrafficExchangeDTO struct {
 	Status      int    `json:"status"`
 	ContentType string `json:"content_type"`
 	RespLen     int    `json:"resp_len"`
+	Rewritten   bool   `json:"rewritten"`
 }
 
 func trafficDTOs(ex []traffic.ExchangeMeta) []TrafficExchangeDTO {
@@ -189,6 +190,7 @@ func trafficDTOs(ex []traffic.ExchangeMeta) []TrafficExchangeDTO {
 			Status:      e.Status,
 			ContentType: e.ContentType,
 			RespLen:     e.RespLen,
+			Rewritten:   e.Rewritten,
 		})
 	}
 	return out

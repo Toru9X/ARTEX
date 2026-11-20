@@ -29,11 +29,13 @@ import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
+import { taskAssetTypeLabel } from "@/lib/task-assets";
 import type {
   AssetInterceptKind,
   AssetInterceptRule,
   Finding,
   ModelTokenStat,
+  NewAssetType,
   Stats,
   Task,
   TaskConstraint,
@@ -42,6 +44,7 @@ import type {
   TaskScopeRow,
 } from "@/lib/types";
 import { setVisibleInterval } from "@/lib/polling";
+import { intlLocale, t } from "@/i18n";
 
 // Compact token count formatting (12345 → 12.3k, 2000000 → 2M).
 function fmtTokens(n: number): string {
@@ -61,24 +64,24 @@ function scopeValue(row: TaskScopeRow): string {
   if (row.value) return row.value;
   if (row.domain) return row.domain;
   if (row.net) return row.net;
-  if (row.company_id) return row.company_name?.trim() ? row.company_name : `Company #${row.company_id}`;
+  if (row.company_id) return row.company_name?.trim() ? row.company_name : t("Company #{id}", { id: row.company_id });
   return "—";
 }
 
 const SCOPE_KIND_LABELS: Record<TaskScopeRow["kind"], string> = {
-  company: "Company",
-  root_domain: "Root domain",
-  subdomain: "Subdomain",
+  company: t("Company"),
+  root_domain: t("Root domain"),
+  subdomain: t("Subdomain"),
   ip: "IP",
   cidr: "CIDR",
   icp: "ICP",
-  keyword: "Keyword",
+  keyword: t("Keyword"),
 };
 
 const SCOPE_SOURCE_LABELS: Record<TaskScopeRow["source"], string> = {
-  auto: "Auto",
-  agent: "Agent",
-  manual: "Manual",
+  auto: t("Auto"),
+  agent: t("Agent"),
+  manual: t("Manual"),
 };
 
 function StatCard({
@@ -187,7 +190,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       setGoalVuln("");
       await loadGoals();
     } catch (e) {
-      setGoalErr(e instanceof Error ? e.message : "Failed to add");
+      setGoalErr(e instanceof Error ? e.message : t("Failed to add"));
     } finally {
       setGoalBusy(false);
     }
@@ -215,7 +218,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       cancelEditGoal();
       await loadGoals();
     } catch (e) {
-      setGoalErr(e instanceof Error ? e.message : "Failed to save");
+      setGoalErr(e instanceof Error ? e.message : t("Failed to save"));
     } finally {
       setGoalBusy(false);
     }
@@ -249,7 +252,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       setConText("");
       await loadConstraints();
     } catch (e) {
-      setConErr(e instanceof Error ? e.message : "Failed to add");
+      setConErr(e instanceof Error ? e.message : t("Failed to add"));
     } finally {
       setConBusy(false);
     }
@@ -277,7 +280,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       cancelEditConstraint();
       await loadConstraints();
     } catch (e) {
-      setConErr(e instanceof Error ? e.message : "Failed to save");
+      setConErr(e instanceof Error ? e.message : t("Failed to save"));
     } finally {
       setConBusy(false);
     }
@@ -302,7 +305,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       setScopeValueInput("");
       await loadScope();
     } catch (e) {
-      setScopeErr(e instanceof Error ? e.message : "Failed to add");
+      setScopeErr(e instanceof Error ? e.message : t("Failed to add"));
     } finally {
       setScopeBusy(false);
     }
@@ -435,16 +438,16 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <TargetIcon className="size-4 text-primary" /> Task description & goal
+            <TargetIcon className="size-4 text-primary" /> {t("Task description & goal")}
           </CardTitle>
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="flex flex-col gap-1.5">
-            <div className="text-xs font-medium text-muted-foreground">Description</div>
+            <div className="text-xs font-medium text-muted-foreground">{t("Description")}</div>
             <p className="text-sm whitespace-pre-wrap break-words">{task?.description?.trim() || "—"}</p>
           </div>
           <div className="flex flex-col gap-1.5">
-            <div className="text-xs font-medium text-muted-foreground">Goal</div>
+            <div className="text-xs font-medium text-muted-foreground">{t("Goal")}</div>
             <p className="text-sm whitespace-pre-wrap break-words">{task?.goal?.trim() || "—"}</p>
           </div>
         </CardContent>
@@ -454,9 +457,11 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <ListChecksIcon className="size-4 text-primary" /> Goal management
+            <ListChecksIcon className="size-4 text-primary" /> {t("Goal management")}
             <span className="text-muted-foreground text-xs font-normal">
-              (final verifiable goals, {goals.length} in total; adds/edits notify the planner and revive the task)
+              {t("(final verifiable goals, {count} in total; adds/edits notify the planner and revive the task)", {
+                count: goals.length,
+              })}
             </span>
           </CardTitle>
         </CardHeader>
@@ -465,7 +470,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           <div className="flex flex-wrap items-center gap-2">
             <Input
               className="h-7 min-w-56 flex-1 text-sm"
-              placeholder="Add a goal, e.g. 'gain unauthorized access with an admin account'"
+              placeholder={t("Add a goal, e.g. 'gain unauthorized access with an admin account'")}
               value={goalText}
               onChange={(e) => setGoalText(e.target.value)}
               onKeyDown={(e) => {
@@ -475,7 +480,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             />
             <Input
               className="h-7 w-32 text-sm"
-              placeholder="Vulnerability class (optional)"
+              placeholder={t("Vulnerability class (optional)")}
               value={goalVuln}
               onChange={(e) => setGoalVuln(e.target.value)}
               onKeyDown={(e) => {
@@ -484,7 +489,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               disabled={goalBusy}
             />
             <Button size="sm" variant="outline" disabled={goalBusy || !goalText.trim()} onClick={() => void addGoal()}>
-              <PlusIcon className="size-3.5" /> Add
+              <PlusIcon className="size-3.5" /> {t("Add")}
             </Button>
             {goalErr && <span className="text-xs text-red-500">{goalErr}</span>}
           </div>
@@ -507,7 +512,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                     />
                     <Input
                       className="h-7 w-32 text-sm"
-                      placeholder="Vulnerability class (optional)"
+                      placeholder={t("Vulnerability class (optional)")}
                       value={editVuln}
                       onChange={(e) => setEditVuln(e.target.value)}
                       onKeyDown={(e) => {
@@ -567,7 +572,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               )}
             </div>
           ) : (
-            <p className="text-muted-foreground text-sm">No goals yet. Once added, the planner dispatches exploration intents from them and judges completion.</p>
+            <p className="text-muted-foreground text-sm">
+              {t("No goals yet. Once added, the planner dispatches exploration intents from them and judges completion.")}
+            </p>
           )}
         </CardContent>
       </Card>
@@ -577,9 +584,12 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <ShieldAlertIcon className="size-4 text-amber-500" /> Operation constraints
+            <ShieldAlertIcon className="size-4 text-amber-500" /> {t("Operation constraints")}
             <span className="text-muted-foreground text-xs font-normal">
-              (bounds planner/worker exploration, {constraints.length} in total; changes take effect at the next planning round)
+              {t(
+                "(bounds planner/worker exploration, {count} in total; changes take effect at the next planning round)",
+                { count: constraints.length },
+              )}
             </span>
           </CardTitle>
         </CardHeader>
@@ -591,12 +601,12 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               value={conKind}
               onChange={(e) => setConKind(e.target.value as TaskConstraint["kind"])}
             >
-              <NativeSelectOption value="deny">Deny</NativeSelectOption>
-              <NativeSelectOption value="allow">Allow</NativeSelectOption>
+              <NativeSelectOption value="deny">{t("Deny")}</NativeSelectOption>
+              <NativeSelectOption value="allow">{t("Allow")}</NativeSelectOption>
             </NativeSelect>
             <Input
               className="h-7 min-w-56 flex-1 text-sm"
-              placeholder="One operation constraint, e.g. 'test only the current port, do not scan other ports'"
+              placeholder={t("One operation constraint, e.g. 'test only the current port, do not scan other ports'")}
               value={conText}
               onChange={(e) => setConText(e.target.value)}
               onKeyDown={(e) => {
@@ -610,7 +620,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               disabled={conBusy || !conText.trim()}
               onClick={() => void addConstraint()}
             >
-              <PlusIcon className="size-3.5" /> Add
+              <PlusIcon className="size-3.5" /> {t("Add")}
             </Button>
             {conErr && <span className="text-xs text-red-500">{conErr}</span>}
           </div>
@@ -625,8 +635,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       value={editConKind}
                       onChange={(e) => setEditConKind(e.target.value as TaskConstraint["kind"])}
                     >
-                      <NativeSelectOption value="deny">Deny</NativeSelectOption>
-                      <NativeSelectOption value="allow">Allow</NativeSelectOption>
+                      <NativeSelectOption value="deny">{t("Deny")}</NativeSelectOption>
+                      <NativeSelectOption value="allow">{t("Allow")}</NativeSelectOption>
                     </NativeSelect>
                     <Input
                       className="h-7 min-w-56 flex-1 text-sm"
@@ -667,7 +677,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                           : "bg-red-500/15 text-red-600 dark:text-red-400"
                       }`}
                     >
-                      {c.kind === "allow" ? "Allow" : "Deny"}
+                      {c.kind === "allow" ? t("Allow") : t("Deny")}
                     </span>
                     <span className="min-w-0 flex-1 break-words">{c.text}</span>
                     <Button
@@ -694,7 +704,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             </div>
           ) : (
             <p className="text-muted-foreground text-sm">
-              No operation constraints yet. They are extracted automatically from the description/goal at task creation; you can also add, edit, or delete them here to bound which operations are allowed/denied.
+              {t(
+                "No operation constraints yet. They are extracted automatically from the description/goal at task creation; you can also add, edit, or delete them here to bound which operations are allowed/denied.",
+              )}
             </p>
           )}
         </CardContent>
@@ -704,8 +716,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <TargetIcon className="size-4 text-emerald-500" /> Asset test coverage
-              <span className="text-muted-foreground text-xs font-normal">(rough estimate, for reference only)</span>
+              <TargetIcon className="size-4 text-emerald-500" /> {t("Asset test coverage")}
+              <span className="text-muted-foreground text-xs font-normal">{t("(rough estimate, for reference only)")}</span>
             </CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
@@ -714,7 +726,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                 {coverage.pct != null ? Math.round(coverage.pct * 100) + "%" : "—"}
               </span>
               <span className="text-muted-foreground text-sm">
-                Tested {coverage.tested} / in scope {coverage.denominator}
+                {t("Tested {tested} / in scope {total}", { tested: coverage.tested, total: coverage.denominator })}
               </span>
             </div>
             {coverage.pct != null && <Progress value={Math.round(coverage.pct * 100)} />}
@@ -722,7 +734,10 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               <div className="flex flex-wrap gap-1.5 text-xs">
                 {coverage.by_type.map((b) => (
                   <span key={b.type} className="bg-muted rounded px-1.5 py-0.5">
-                    <span className="text-muted-foreground">{b.type}</span>{" "}
+                    <span className="text-muted-foreground">
+                      {(taskAssetTypeLabel as (x: NewAssetType) => string | undefined)(b.type as NewAssetType) ||
+                        b.type}
+                    </span>{" "}
                     <span className="tabular-nums font-medium">
                       {b.tested}/{b.total}
                     </span>
@@ -735,11 +750,11 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             )}
             {coverage.gaps && (
               <div className="text-xs">
-                <span className="font-medium">Coverage gaps: {coverage.gaps.length}</span>
+                <span className="font-medium">{t("Coverage gaps: {count}", { count: coverage.gaps.length })}</span>
                 <ul className="text-muted-foreground mt-1 list-disc pl-4">
                   {coverage.gaps.map((g, i) => (
                     <li key={i}>
-                      {g.kind} {g.surface ? g.surface + " " : ""}
+                      {t(g.kind)} {g.surface ? g.surface + " " : ""}
                       {g.risk_area}
                     </li>
                   ))}
@@ -753,9 +768,11 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <CoinsIcon className="size-4 text-amber-500" /> LLM token usage
+            <CoinsIcon className="size-4 text-amber-500" /> {t("LLM token usage")}
             <span className="text-muted-foreground text-xs font-normal">
-              (per model{tokenTotals.calls > 0 ? `, ${tokenTotals.calls} calls in total` : ""})
+              {tokenTotals.calls > 0
+                ? t("(per model, {count} calls in total)", { count: tokenTotals.calls })
+                : t("(per model)")}
             </span>
           </CardTitle>
         </CardHeader>
@@ -765,19 +782,19 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               {/* Totals overview */}
               <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
                 <span className="tabular-nums">
-                  <span className="text-muted-foreground">Input </span>
+                  <span className="text-muted-foreground">{t("Input")} </span>
                   <span className="font-semibold">{fmtTokens(tokenTotals.input)}</span>
                 </span>
                 <span className="tabular-nums">
-                  <span className="text-muted-foreground">Output </span>
+                  <span className="text-muted-foreground">{t("Output")} </span>
                   <span className="font-semibold">{fmtTokens(tokenTotals.output)}</span>
                 </span>
                 <span className="tabular-nums">
-                  <span className="text-muted-foreground">Cache read </span>
+                  <span className="text-muted-foreground">{t("Cache read")} </span>
                   <span className="font-semibold">{fmtTokens(tokenTotals.cacheRead)}</span>
                 </span>
                 <span className="tabular-nums">
-                  <span className="text-muted-foreground">Cache hit rate </span>
+                  <span className="text-muted-foreground">{t("Cache hit rate")} </span>
                   <span className="font-semibold text-emerald-500">
                     {cacheHitRate(tokenTotals.cacheRead, tokenTotals.input)}
                   </span>
@@ -788,12 +805,12 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-muted-foreground border-b text-left text-xs">
-                      <th className="py-1.5 pr-3 font-medium">Model</th>
-                      <th className="py-1.5 pr-3 text-right font-medium">Calls</th>
-                      <th className="py-1.5 pr-3 text-right font-medium">Input</th>
-                      <th className="py-1.5 pr-3 text-right font-medium">Output</th>
-                      <th className="py-1.5 pr-3 text-right font-medium">Cache read</th>
-                      <th className="py-1.5 text-right font-medium">Hit rate</th>
+                      <th className="py-1.5 pr-3 font-medium">{t("Model")}</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">{t("Calls")}</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">{t("Input")}</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">{t("Output")}</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">{t("Cache read")}</th>
+                      <th className="py-1.5 text-right font-medium">{t("Hit rate")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -816,7 +833,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               </div>
             </>
           ) : (
-            <p className="text-muted-foreground text-sm">No LLM usage yet (the task has made no calls, or records are still being written).</p>
+            <p className="text-muted-foreground text-sm">
+              {t("No LLM usage yet (the task has made no calls, or records are still being written).")}
+            </p>
           )}
         </CardContent>
       </Card>
@@ -824,9 +843,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <ShieldCheckIcon className="size-4 text-emerald-500" /> Test scope
+            <ShieldCheckIcon className="size-4 text-emerald-500" /> {t("Test scope")}
             <span className="text-muted-foreground text-xs font-normal">
-              (coverage scope, not enforced, {scope.length} in total)
+              {t("(coverage scope, not enforced, {count} in total)", { count: scope.length })}
             </span>
           </CardTitle>
         </CardHeader>
@@ -838,26 +857,26 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               value={scopeKind}
               onChange={(e) => setScopeKind(e.target.value as TaskScopeRow["kind"])}
             >
-              <NativeSelectOption value="root_domain">Root domain</NativeSelectOption>
-              <NativeSelectOption value="subdomain">Subdomain</NativeSelectOption>
+              <NativeSelectOption value="root_domain">{t("Root domain")}</NativeSelectOption>
+              <NativeSelectOption value="subdomain">{t("Subdomain")}</NativeSelectOption>
               <NativeSelectOption value="ip">IP</NativeSelectOption>
               <NativeSelectOption value="cidr">CIDR</NativeSelectOption>
               <NativeSelectOption value="icp">ICP</NativeSelectOption>
-              <NativeSelectOption value="keyword">Keyword</NativeSelectOption>
-              <NativeSelectOption value="company">Company</NativeSelectOption>
+              <NativeSelectOption value="keyword">{t("Keyword")}</NativeSelectOption>
+              <NativeSelectOption value="company">{t("Company")}</NativeSelectOption>
             </NativeSelect>
             <Input
               className="h-7 w-56 text-sm"
               placeholder={
                 scopeKind === "company"
-                  ? "Company name or id"
+                  ? t("Company name or id")
                   : scopeKind === "ip" || scopeKind === "cidr"
-                    ? "e.g. 10.0.0.1 or 10.0.0.0/24"
+                    ? t("e.g. 10.0.0.1 or 10.0.0.0/24")
                     : scopeKind === "icp"
-                      ? "e.g. Beijing ICP No.12345678-1"
+                      ? t("e.g. Beijing ICP No.12345678-1")
                       : scopeKind === "keyword"
-                        ? "e.g. a company-name keyword"
-                        : "e.g. example.com"
+                        ? t("e.g. a company-name keyword")
+                        : t("e.g. example.com")
               }
               value={scopeValueInput}
               onChange={(e) => setScopeValueInput(e.target.value)}
@@ -872,7 +891,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               disabled={scopeBusy || !scopeValueInput.trim()}
               onClick={() => void addScope()}
             >
-              <PlusIcon className="size-3.5" /> Add
+              <PlusIcon className="size-3.5" /> {t("Add")}
             </Button>
             {scopeErr && <span className="text-xs text-red-500">{scopeErr}</span>}
           </div>
@@ -896,13 +915,15 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       <Trash2Icon className="size-3.5 text-red-500" />
                     </Button>
                   ) : (
-                    <span className="text-muted-foreground shrink-0 text-xs">Inherited</span>
+                    <span className="text-muted-foreground shrink-0 text-xs">{t("Inherited")}</span>
                   )}
                 </div>
               ))}
             </div>
           ) : (
-            <p className="text-muted-foreground text-sm">No test scope yet; once added it serves as the asset coverage denominator.</p>
+            <p className="text-muted-foreground text-sm">
+              {t("No test scope yet; once added it serves as the asset coverage denominator.")}
+            </p>
           )}
         </CardContent>
       </Card>
@@ -910,12 +931,12 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <ActivityIcon className="size-4 text-blue-500" /> Heartbeat
+            <ActivityIcon className="size-4 text-blue-500" /> {t("Heartbeat")}
           </CardTitle>
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <div>
-            <div className="text-xs text-muted-foreground">Engine state</div>
+            <div className="text-xs text-muted-foreground">{t("Engine state")}</div>
             <StatusBadge
               domain="engine"
               value={stats?.engine_mode ?? task?.engine_mode ?? "idle"}
@@ -924,28 +945,28 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             />
           </div>
           <div>
-            <div className="text-xs text-muted-foreground">Running workers</div>
+            <div className="text-xs text-muted-foreground">{t("Running workers")}</div>
             <div className="mt-1 text-lg font-semibold tabular-nums">{running.length}</div>
           </div>
           <div>
-            <div className="text-xs text-muted-foreground">Last activity</div>
+            <div className="text-xs text-muted-foreground">{t("Last activity")}</div>
             <div className="mt-1 inline-flex items-center gap-1 text-sm">
               <ClockIcon className="size-3.5" />
-              {task?.last_activity ? new Date(task.last_activity).toLocaleTimeString("zh-CN") : "—"}
+              {task?.last_activity ? new Date(task.last_activity).toLocaleTimeString(intlLocale) : "—"}
             </div>
           </div>
           <div>
             <div className="text-xs text-muted-foreground">
-              Goals {task?.goals_met ?? 0}/{task?.goals_total ?? 0}
+              {t("Goals {met}/{total}", { met: task?.goals_met ?? 0, total: task?.goals_total ?? 0 })}
             </div>
             <Progress value={goalsPct} className="mt-2" />
           </div>
           {task?.completed_unix && task.completed_unix > 0 ? (
             <div>
-              <div className="text-xs text-muted-foreground">Completed at</div>
+              <div className="text-xs text-muted-foreground">{t("Completed at")}</div>
               <div className="mt-1 inline-flex items-center gap-1 text-sm">
                 <ClockIcon className="size-3.5" />
-                {new Date(task.completed_unix * 1000).toLocaleString("zh-CN")}
+                {new Date(task.completed_unix * 1000).toLocaleString(intlLocale)}
               </div>
             </div>
           ) : null}
@@ -957,7 +978,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-sm">
-              <TargetIcon className="size-4" /> Running intents
+              <TargetIcon className="size-4" /> {t("Running intents")}
             </CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
@@ -967,32 +988,32 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                 <span className="min-w-0 flex-1 truncate">{i.payload}</span>
               </div>
             ))}
-            {running.length === 0 && <p className="text-sm text-muted-foreground">No running intents</p>}
+            {running.length === 0 && <p className="text-sm text-muted-foreground">{t("No running intents")}</p>}
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-sm">
-              <AlertTriangleIcon className="size-4 text-amber-500" /> Needs attention
+              <AlertTriangleIcon className="size-4 text-amber-500" /> {t("Needs attention")}
             </CardTitle>
           </CardHeader>
           <CardContent className="grid grid-cols-2 gap-3 text-sm">
             <div>
               <div className="text-2xl font-semibold tabular-nums text-red-600">{taskFindings.length}</div>
-              <div className="text-xs text-muted-foreground">Confirmed vulnerabilities</div>
+              <div className="text-xs text-muted-foreground">{t("Confirmed vulnerabilities")}</div>
             </div>
             <div>
               <div className="text-2xl font-semibold tabular-nums text-blue-600">{running.length}</div>
-              <div className="text-xs text-muted-foreground">Running</div>
+              <div className="text-xs text-muted-foreground">{t("Running")}</div>
             </div>
             <div>
               <div className="text-2xl font-semibold tabular-nums">{open.length}</div>
-              <div className="text-xs text-muted-foreground">frontier open</div>
+              <div className="text-xs text-muted-foreground">{t("frontier open")}</div>
             </div>
             <div>
               <div className="text-2xl font-semibold tabular-nums text-red-600">{blocked.length}</div>
-              <div className="text-xs text-muted-foreground">Blocked intents</div>
+              <div className="text-xs text-muted-foreground">{t("Blocked intents")}</div>
             </div>
           </CardContent>
         </Card>
@@ -1000,7 +1021,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-sm">
-              <BugIcon className="size-4 text-red-500" /> Recent findings
+              <BugIcon className="size-4 text-red-500" /> {t("Recent findings")}
             </CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
@@ -1010,7 +1031,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                 <span className="min-w-0 flex-1 truncate">{f.summary}</span>
               </div>
             ))}
-            {taskFindings.length === 0 && <p className="text-sm text-muted-foreground">No findings yet</p>}
+            {taskFindings.length === 0 && <p className="text-sm text-muted-foreground">{t("No findings yet")}</p>}
           </CardContent>
         </Card>
       </div>
@@ -1021,12 +1042,14 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         <Card className="border-red-500/30">
           <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
             <CardTitle className="flex items-center gap-2 text-sm">
-              <AlertTriangleIcon className="size-4 text-red-500" /> Blocked/errored intents
-              <span className="text-xs font-normal text-muted-foreground">({blocked.length} in total, re-runnable)</span>
+              <AlertTriangleIcon className="size-4 text-red-500" /> {t("Blocked/errored intents")}
+              <span className="text-xs font-normal text-muted-foreground">
+                {t("({count} in total, re-runnable)", { count: blocked.length })}
+              </span>
             </CardTitle>
             <Button size="sm" variant="outline" disabled={rerunning.has("__all__")} onClick={() => void rerunAll()}>
               <RefreshCwIcon className={`size-3.5 ${rerunning.has("__all__") ? "animate-spin" : ""}`} />
-              Re-run all
+              {t("Re-run all")}
             </Button>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
@@ -1042,13 +1065,15 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                   onClick={() => void rerunOne(i.id)}
                 >
                   <RefreshCwIcon className={`size-3 ${rerunning.has(i.id) ? "animate-spin" : ""}`} />
-                  Re-run
+                  {t("Re-run")}
                 </Button>
               </div>
             ))}
             {blocked.length > 20 && (
               <p className="text-xs text-muted-foreground">
-                Only the first 20 are shown; click "Re-run all" to handle the remaining {blocked.length - 20}.
+                {t('Only the first 20 are shown; click "Re-run all" to handle the remaining {count}.', {
+                  count: blocked.length - 20,
+                })}
               </p>
             )}
           </CardContent>
@@ -1057,21 +1082,26 @@ export function OverviewTab({ taskId }: { taskId: string }) {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
-        <StatCard label="Open intents" value={open.length} icon={ShieldCheckIcon} sub="frontier open" />
-        <StatCard label="Confirmed findings" value={taskFindings.length} icon={BugIcon} sub="this task" />
-        <StatCard label="Total intents" value={intents.length} icon={AlertTriangleIcon} sub="all intents of this task" />
+        <StatCard label={t("Open intents")} value={open.length} icon={ShieldCheckIcon} sub={t("frontier open")} />
+        <StatCard label={t("Confirmed findings")} value={taskFindings.length} icon={BugIcon} sub={t("this task")} />
+        <StatCard
+          label={t("Total intents")}
+          value={intents.length}
+          icon={AlertTriangleIcon}
+          sub={t("all intents of this task")}
+        />
       </div>
     </div>
   );
 }
 
 const TASK_RULE_KIND_OPTIONS: { value: AssetInterceptKind; label: string; placeholder: string }[] = [
-  { value: "exact_domain", label: "Domain (exact)", placeholder: "example.gov.cn" },
-  { value: "exact_ip", label: "IP (exact)", placeholder: "203.0.113.10" },
-  { value: "exact_url", label: "URL (exact)", placeholder: "https://example.com/login" },
-  { value: "fuzzy_domain", label: "Domain (fuzzy)", placeholder: ".gov.cn" },
-  { value: "fuzzy_ip", label: "IP (fuzzy)", placeholder: "203.0.113." },
-  { value: "fuzzy_url", label: "URL (fuzzy)", placeholder: "/admin" },
+  { value: "exact_domain", label: t("Domain (exact)"), placeholder: "example.gov.cn" },
+  { value: "exact_ip", label: t("IP (exact)"), placeholder: "203.0.113.10" },
+  { value: "exact_url", label: t("URL (exact)"), placeholder: "https://example.com/login" },
+  { value: "fuzzy_domain", label: t("Domain (fuzzy)"), placeholder: ".gov.cn" },
+  { value: "fuzzy_ip", label: t("IP (fuzzy)"), placeholder: "203.0.113." },
+  { value: "fuzzy_url", label: t("URL (fuzzy)"), placeholder: "/admin" },
   { value: "cidr", label: "CIDR", placeholder: "192.168.0.0/16" },
 ];
 
@@ -1183,9 +1213,11 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
-          <ShieldCheckIcon className="size-4 text-sky-500" /> Task-level asset intercept / allow
+          <ShieldCheckIcon className="size-4 text-sky-500" /> {t("Task-level asset intercept / allow")}
           <span className="text-muted-foreground text-xs font-normal">
-            (this task only, never global; block rules evaluate before allow rules, {rules.length} in total)
+            {t("(this task only, never global; block rules evaluate before allow rules, {count} in total)", {
+              count: rules.length,
+            })}
           </span>
         </CardTitle>
       </CardHeader>
@@ -1193,8 +1225,8 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
         {/* Add form */}
         <div className="flex flex-wrap items-center gap-2">
           <NativeSelect size="sm" value={newAction} onChange={(e) => setNewAction(e.target.value as "block" | "allow")}>
-            <NativeSelectOption value="block">Block</NativeSelectOption>
-            <NativeSelectOption value="allow">Allow</NativeSelectOption>
+            <NativeSelectOption value="block">{t("Block")}</NativeSelectOption>
+            <NativeSelectOption value="allow">{t("Allow")}</NativeSelectOption>
           </NativeSelect>
           <NativeSelect size="sm" value={newKind} onChange={(e) => setNewKind(e.target.value as AssetInterceptKind)}>
             {TASK_RULE_KIND_OPTIONS.map((o) => (
@@ -1215,13 +1247,13 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
           />
           <Input
             className="h-7 w-36 text-sm"
-            placeholder="Note (optional)"
+            placeholder={t("Note (optional)")}
             value={newNote}
             onChange={(e) => setNewNote(e.target.value)}
             disabled={busy}
           />
           <Button size="sm" variant="outline" disabled={busy || !newPattern.trim()} onClick={() => void add()}>
-            <PlusIcon className="size-3.5" /> Add
+            <PlusIcon className="size-3.5" /> {t("Add")}
           </Button>
           {err && <span className="text-xs text-red-500">{err}</span>}
         </div>
@@ -1236,8 +1268,8 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
                     value={editAction}
                     onChange={(e) => setEditAction(e.target.value as "block" | "allow")}
                   >
-                    <NativeSelectOption value="block">Block</NativeSelectOption>
-                    <NativeSelectOption value="allow">Allow</NativeSelectOption>
+                    <NativeSelectOption value="block">{t("Block")}</NativeSelectOption>
+                    <NativeSelectOption value="allow">{t("Allow")}</NativeSelectOption>
                   </NativeSelect>
                   <NativeSelect
                     size="sm"
@@ -1263,7 +1295,7 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
                   />
                   <Input
                     className="h-7 w-36 text-sm"
-                    placeholder="Note (optional)"
+                    placeholder={t("Note (optional)")}
                     value={editNote}
                     onChange={(e) => setEditNote(e.target.value)}
                     disabled={busy}
@@ -1296,7 +1328,7 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
                         : "bg-red-500/15 text-red-600 dark:text-red-400"
                     }`}
                   >
-                    {r.action === "allow" ? "Allow" : "Block"}
+                    {r.action === "allow" ? t("Allow") : t("Block")}
                   </span>
                   <span className="text-muted-foreground shrink-0 text-xs">{TASK_RULE_KIND_LABEL[r.kind]}</span>
                   <code className="bg-muted min-w-0 flex-1 truncate rounded px-1.5 py-0.5 text-xs">{r.pattern}</code>
@@ -1328,7 +1360,9 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
           </div>
         ) : (
           <p className="text-muted-foreground text-sm">
-            No task-level rules. A "Block" hit forbids testing; "Allow" is a whitelist — once configured, this task only permits assets that match an allow rule (no whitelist when unconfigured).
+            {t(
+              'No task-level rules. A "Block" hit forbids testing; "Allow" is a whitelist — once configured, this task only permits assets that match an allow rule (no whitelist when unconfigured).',
+            )}
           </p>
         )}
       </CardContent>
