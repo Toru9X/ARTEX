@@ -79,6 +79,7 @@ func (c secretColumn) valueExpr() string {
 var (
 	colLLMKey      = secretColumn{"llm_profiles", "api_key", false, ""}
 	colLLMProxy    = secretColumn{"llm_profiles", "proxy", false, ""} // may carry user:pass
+	colLLMHeaders  = secretColumn{"llm_profiles", "custom_headers", false, ""}
 	colMCPEnv      = secretColumn{"mcp_servers", "env", true, ""}
 	colCredPass    = secretColumn{"task_credentials", "password", false, ""}
 	colNotifConfig = secretColumn{"notification_channels", "config", true, ""}
@@ -90,7 +91,12 @@ var (
 	// Capture-proxy rewrite rules: an action may carry a token, a matcher a header value.
 	colRewriteMatchers = secretColumn{"traffic_rewrite_rules", "matchers", true, ""}
 	colRewriteActions  = secretColumn{"traffic_rewrite_rules", "actions", true, ""}
-	secretColumns      = append([]secretColumn{colLLMKey, colLLMProxy, colMCPEnv, colCredPass, colNotifConfig, colToolExec, colEvReqHead, colEvRespHead, colRewriteMatchers, colRewriteActions}, secretSettingColumns()...)
+	// Capture-proxy tampering hooks and their version history: source may carry hardcoded secrets.
+	colHookMatchers    = secretColumn{"traffic_tamper_hooks", "matchers", true, ""}
+	colHookSource      = secretColumn{"traffic_tamper_hooks", "source", false, ""}
+	colHookVerMatchers = secretColumn{"traffic_tamper_hook_versions", "matchers", true, ""}
+	colHookVerSource   = secretColumn{"traffic_tamper_hook_versions", "source", false, ""}
+	secretColumns      = append([]secretColumn{colLLMKey, colLLMProxy, colLLMHeaders, colMCPEnv, colCredPass, colNotifConfig, colToolExec, colEvReqHead, colEvRespHead, colRewriteMatchers, colRewriteActions, colHookMatchers, colHookSource, colHookVerMatchers, colHookVerSource}, secretSettingColumns()...)
 )
 
 // secretSettingKeys are the settings stored encrypted, AAD "settings.<key>".

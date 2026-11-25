@@ -219,11 +219,18 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				_ = c.Close()
 			}
 		}
+		var skillNames []string
+		if reg != nil {
+			for _, s := range reg.List() {
+				skillNames = append(skillNames, s.Name)
+			}
+		}
 		def := agent.DeferredInfo{
 			Deferred:    allNames,
 			GlobalNames: globalNames,
 			Unlock:      unlock,
 			UnlockSkill: unlockSkill,
+			SkillIndex:  agent.SkillIndexBlock(skillNames),
 		}
 		return extra, def, cleanup
 	})
@@ -290,6 +297,7 @@ func seedPrompts(pg *db.DB) {
 // and default params get injected. MCP/skill/host tools have no row and pass through.
 func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 	agent.SetFindingTrafficBindingEnabled(func() bool { return pg.GetBool(settingAgentTrafficBinding, false) })
+	agent.SetTrafficCaptureEnabled(func() bool { return pg.GetBool(settingTrafficCapture, false) })
 	agent.IntelligenceEnabled = func() bool { return pg.GetBool(db.SettingTaskIntelligence, false) }
 	agent.IntelligenceRecord = func(ctx context.Context, taskID, nodeID int64, worker string, input db.IntelligenceInput) (int64, error) {
 		// Re-checked on every write, not captured at session build: turning the

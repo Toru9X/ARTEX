@@ -64,6 +64,7 @@ import { parseCompanyScopeText } from "@/lib/company-scope";
 import { httpHref } from "@/lib/http-href";
 import type { Asset, Company, CompanyScopeRule } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useActiveCompanyID } from "@/stores/company/company-store";
 import { t } from "@/i18n";
 
 const METHOD_COLOR: Record<string, string> = {
@@ -111,6 +112,8 @@ const TABS: { key: string; label: string; icon: LucideIcon }[] = [
 ];
 
 export default function AssetsPage() {
+  // The sidebar's company switcher narrows the data tabs to that company.
+  const companyId = useActiveCompanyID();
   // The asset whose linked intelligence is open in the dialog; null means closed.
   const [intelligenceAsset, setIntelligenceAsset] = React.useState<number | null>(null);
   const [rows, setRows] = React.useState<Asset[]>([]);
@@ -245,7 +248,7 @@ export default function AssetsPage() {
   }, [tab]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: these controls intentionally reset server pagination.
-  React.useEffect(() => setPage(0), [tab, size, query]);
+  React.useEffect(() => setPage(0), [tab, size, query, companyId]);
 
   const dslMode = query.trim() !== "";
 
@@ -259,7 +262,9 @@ export default function AssetsPage() {
     const offset = page * size;
     const run = async () => {
       try {
-        const r = dsl ? await api.searchAssets(dsl, tab, size, offset) : await api.assets(tab, size, offset);
+        const r = dsl
+          ? await api.searchAssets(dsl, tab, size, offset, companyId)
+          : await api.assets(tab, size, offset, companyId);
         if (assetsRequestRef.current !== request) return;
         setRows(r.assets);
         setRowsTab(tab);
@@ -283,7 +288,7 @@ export default function AssetsPage() {
       clearTimeout(tid);
       if (assetsRequestRef.current === request) assetsRequestRef.current++;
     };
-  }, [tab, page, size, query, refreshKey]);
+  }, [tab, page, size, query, refreshKey, companyId]);
 
   React.useEffect(() => {
     if (tab === "company") return;
@@ -811,7 +816,9 @@ export default function AssetsPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t("Delete company · {name}", { name: companyDeleteTarget?.name ?? "" })}</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t("Delete company · {name}", { name: companyDeleteTarget?.name ?? "" })}
+            </AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
                 <p>

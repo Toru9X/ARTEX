@@ -60,6 +60,7 @@ import type {
   VerificationStatus,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useActiveCompany } from "@/stores/company/company-store";
 
 import { AssetTree, assetPathOf } from "./_components/asset-tree";
 import {
@@ -147,6 +148,7 @@ const EMPTY_STATS: FindingStats = {
 };
 
 export default function FindingsPage() {
+  const company = useActiveCompany();
   const [view, setView] = React.useState<FindingView>("cases");
   const [severity, setSeverity] = React.useState<"all" | Severity>("all");
   const [status, setStatus] = React.useState<"all" | FindingStatus>("all");
@@ -194,6 +196,7 @@ export default function FindingsPage() {
     query,
     dateRange.from,
     dateRange.to,
+    company,
   ]);
   const activeFilterFingerprint = React.useRef(filterFingerprint);
   activeFilterFingerprint.current = filterFingerprint;
@@ -351,6 +354,7 @@ export default function FindingsPage() {
           task,
           query,
           sort,
+          company,
           ...dateRange,
           assetScope: view === "asset" ? (assetScope ?? undefined) : undefined,
         },
@@ -379,6 +383,13 @@ export default function FindingsPage() {
   groupFindingsRef.current = groupFindings;
   visibleGroupKeysRef.current = new Set(groups.map(findingGroupKey));
 
+  // A company switch drops the picked asset node: the node may belong to the
+  // company we just left, and the tree is about to be reloaded under the new one.
+  React.useEffect(() => {
+    void company;
+    setAssetScope(null);
+  }, [company]);
+
   // The asset view's right-hand list is the flat list plus the selected subtree filter, so both views share one list state.
   const activeAssetScope = view === "asset" ? assetScope : null;
 
@@ -401,6 +412,7 @@ export default function FindingsPage() {
           task,
           query,
           sort,
+          company,
           assetScope: activeAssetScope ?? undefined,
           ...dateRange,
         },
@@ -452,6 +464,7 @@ export default function FindingsPage() {
         task,
         query,
         sort,
+        company,
         ...dateRange,
       });
       if (request !== assetTreeRequest.current || activeFilterFingerprint.current !== requestFilter) return;
@@ -486,6 +499,7 @@ export default function FindingsPage() {
         task,
         query,
         sort,
+        company,
         ...dateRange,
       });
       if (request !== groupsRequest.current || activeFilterFingerprint.current !== requestFilter) return;
@@ -528,6 +542,7 @@ export default function FindingsPage() {
             task: key,
             query,
             sort,
+            company,
             ...dateRange,
           },
           true,
@@ -702,10 +717,11 @@ export default function FindingsPage() {
       task,
       query,
       sort,
+      company,
       ...dateRange,
       assetScope: view === "asset" ? (assetScope ?? undefined) : undefined,
     }),
-    [severity, status, reportState, verificationStatus, vulnclass, task, query, sort, dateRange, view, assetScope],
+    [severity, status, reportState, verificationStatus, vulnclass, task, query, sort, company, dateRange, view, assetScope],
   );
 
   const statsFingerprint = JSON.stringify(statsQuery);

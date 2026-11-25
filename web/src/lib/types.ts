@@ -110,6 +110,7 @@ export interface TaskArchiveTokenStats {
 }
 
 export interface TaskArchive {
+  storage?: "local" | "s3";
   id: number;
   task_id: number;
   state: TaskArchiveState;
@@ -621,6 +622,8 @@ export interface FindingQuery {
   to?: string; // ISO timestamp, inclusive
   // asset tree node key; selecting a node selects its whole subtree. Empty = no asset filter.
   assetScope?: string;
+  // company id from the sidebar switcher; also narrows the asset tree. Empty = all companies.
+  company?: string;
 }
 
 // ---- Findings by asset (asset view) ----
@@ -936,6 +939,27 @@ export interface TrafficRewriteStats {
   sweeps: number;
 }
 
+export interface TrafficHARImportError {
+  index: number;
+  url?: string;
+  reason: string;
+}
+
+export interface TrafficHARImportResult {
+  imported: number;
+  skipped: number;
+  failed: number;
+  truncated?: boolean;
+  errors?: TrafficHARImportError[];
+}
+
+export interface TrafficHARExportMeta {
+  exported: number;
+  matched: number;
+  truncated: boolean;
+  truncatedReason?: string;
+}
+
 export interface TrafficResp {
   enabled: boolean;
   proxy?: string;
@@ -976,9 +1000,13 @@ export interface TrafficStreamMessage {
   truncated?: boolean;
 }
 
+export type TrafficStreamDirection = "" | "c2s" | "s2c";
+
 export interface TrafficStreamPage {
   items: TrafficStreamMessage[];
+  // Pagination includes recording-limit rows; the message count does not.
   total: number;
+  message_total: number;
 }
 
 export interface TrafficReplayHeader {
@@ -1197,7 +1225,7 @@ export interface NotificationDelivery {
 export interface LLMProfile {
   id: string;
   name: string;
-  format: "openai" | "anthropic" | "openai-responses" | "ollama" | "jev";
+  format: "openai" | "anthropic" | "openai-responses" | "ollama" | "jev" | "bedrock-gateway";
   base_url?: string;
   proxy?: string;
   model: string;
@@ -1232,6 +1260,7 @@ export interface LLMProfile {
   session_header_key?: string;
   // Custom User-Agent: when non-empty, every outbound LLM request overrides its User-Agent header with this value. "" = do not override (keep the default UA).
   user_agent?: string;
+  custom_headers_set?: boolean;
   // This profile's retry overrides (connect / empty response / same-provider safety window). Empty / all zeros = follow the global policy.
   retry?: LLMRetryOverride;
 }
@@ -2089,4 +2118,118 @@ export interface InterceptExecution {
   session: string;
   seq: number;
   items: Activity[];
+}
+
+// ---- capture-proxy constrained Go tampering hooks (P4.2) ----
+export type TamperHookPhase = "request" | "response";
+
+export interface TamperHookHeaderMatcher {
+  name: string;
+  value_regex?: string;
+}
+
+export interface TamperHookMatchers {
+  methods?: string[];
+  host?: string;
+  url_regex?: string;
+  headers?: TamperHookHeaderMatcher[];
+  body_regex?: string;
+  status?: string[];
+  resp_headers?: TamperHookHeaderMatcher[];
+  resp_body_regex?: string;
+}
+
+export interface TamperHookLastError {
+  class: string;
+  at: string;
+  count: number;
+}
+
+export interface TamperHook {
+  id: number;
+  name: string;
+  enabled: boolean;
+  phase: TamperHookPhase;
+  priority: number;
+  matchers: TamperHookMatchers;
+  source: string;
+  source_sha256: string;
+  version: number;
+  note: string;
+  created_at: string;
+  updated_at: string;
+  load_error?: string;
+  last_error?: TamperHookLastError | null;
+}
+
+export interface TamperHooksListResp {
+  hooks: TamperHook[];
+  enabled_by_env: boolean;
+}
+
+export interface TamperHookVersion {
+  id: number;
+  hook_id: number;
+  version: number;
+  name: string;
+  phase: TamperHookPhase;
+  priority: number;
+  matchers: TamperHookMatchers;
+  source: string;
+  source_sha256: string;
+  note: string;
+  created_at: string;
+}
+
+export interface TamperHookInput {
+  name: string;
+  enabled?: boolean;
+  phase: TamperHookPhase;
+  priority: number;
+  matchers: TamperHookMatchers;
+  source: string;
+  note?: string;
+}
+
+export interface TamperDryRunIO {
+  request: {
+    method: string;
+    url: string;
+    headers: Record<string, string[]>;
+    body: string;
+  };
+  response: {
+    status: number;
+    headers: Record<string, string[]>;
+    body: string;
+  };
+}
+
+export interface TamperDryRunRequest extends TamperDryRunIO {
+  hook_id?: number;
+  name?: string;
+  phase?: TamperHookPhase;
+  matchers?: TamperHookMatchers;
+  source?: string;
+}
+
+export interface TamperTraceLine {
+  Phase: string;
+  SourceKind: string;
+  RuleID: number;
+  HookID: number;
+  HookVersion: number;
+  RuleSnapshot: string;
+  Action: string;
+  Field: string;
+  Outcome: string;
+  Reason: string;
+  BeforeHash: string;
+  AfterHash: string;
+  After: string | null;
+}
+
+export interface TamperDryRunResult extends TamperDryRunIO {
+  changed: boolean;
+  lines: TamperTraceLine[] | null;
 }

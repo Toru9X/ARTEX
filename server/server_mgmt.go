@@ -2122,8 +2122,10 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	// would get wrong — legacy/partial clients that never send it stay streaming.
 	var body struct {
 		db.LLMProfile
-		APIKey    string `json:"api_key"`
-		Streaming *bool  `json:"streaming"`
+		APIKey             string `json:"api_key"`
+		CustomHeaders      string `json:"custom_headers"`
+		ClearCustomHeaders bool   `json:"clear_custom_headers"`
+		Streaming          *bool  `json:"streaming"`
 	}
 	if err := decode(w, r, &body); err != nil {
 		writeErr(w, 400, err.Error())
@@ -2131,6 +2133,35 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	p := body.LLMProfile
 	p.APIKey = body.APIKey
+	p.CustomHeaders = body.CustomHeaders
+	p.ClearCustomHeaders = body.ClearCustomHeaders
+	if p.Format == "bedrock-gateway" {
+		if _, err := agent.ParseBedrockGatewayHeaders(p.CustomHeaders); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		if p.ID != 0 {
+			stored, err := pg.ProfileByID(p.ID)
+			if err != nil {
+				writeErr(w, 500, err.Error())
+				return
+			}
+			if stored != nil && !sameLLMEndpoint(p.Format, p.BaseURL, stored.Format, stored.BaseURL) {
+				if strings.TrimSpace(p.APIKey) == "" {
+					writeErr(w, 400, "enter the bearer token when changing the Bedrock gateway endpoint")
+					return
+				}
+				if p.CustomHeaders == "" {
+					p.ClearCustomHeaders = true
+				}
+			}
+		}
+	} else if p.CustomHeaders != "" {
+		writeErr(w, 400, "custom headers require the Bedrock gateway format")
+		return
+	} else {
+		p.ClearCustomHeaders = true
+	}
 	p.Streaming = body.Streaming == nil || *body.Streaming
 	// The list returns the proxy masked: the placeholder sent back keeps the
 	// stored proxy and is never stored itself.
@@ -2159,6 +2190,25 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.UserAgent = ua
+	if p.Format == "bedrock-gateway" {
+		validate := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
+		validate.CustomHeaders = p.CustomHeaders
+		if p.ID != 0 {
+			stored, _ := pg.ProfileByID(p.ID)
+			if stored != nil && sameLLMEndpoint(p.Format, p.BaseURL, stored.Format, stored.BaseURL) {
+				if validate.APIKey == "" {
+					validate.APIKey = stored.APIKey
+				}
+				if validate.CustomHeaders == "" && !p.ClearCustomHeaders {
+					validate.CustomHeaders = stored.CustomHeaders
+				}
+			}
+		}
+		if _, err := validate.NewProvider(); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
 	id, err := pg.SaveProfile(&p)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -2390,26 +2440,71 @@ func sameRedirectHost(a, b *url.URL) bool {
 	return ha != "" && ha == hb
 }
 
+// Ranges that are not public Internet addresses and that
+// intercept.IsNonPublicAddr does not cover. The shared ones are in use on
+// private networks (overlay networks, fake-IP resolvers), so an allow-listed
+// endpoint may sit there; the reserved ones are never a model endpoint.
+var (
+	modelSharedPrefixes = []netip.Prefix{
+		netip.MustParsePrefix("100.64.0.0/10"), // carrier-grade NAT (RFC 6598)
+		netip.MustParsePrefix("198.18.0.0/15"), // benchmarking (RFC 2544)
+	}
+	modelReservedPrefixes = []netip.Prefix{
+		netip.MustParsePrefix("192.0.0.0/24"), // IETF protocol assignments (RFC 6890)
+		netip.MustParsePrefix("240.0.0.0/4"),  // reserved, and the limited broadcast address
+	}
+	// IPv6 prefixes whose addresses reach the IPv4 host they embed. A DNS64
+	// resolver answers with NAT64 addresses for every IPv4-only name, so the
+	// prefixes are not blocked as a whole: the embedded address is judged.
+	modelNAT64Prefix = netip.MustParsePrefix("64:ff9b::/96") // the low 32 bits name an IPv4 host
+	model6to4Prefix  = netip.MustParsePrefix("2002::/16")    // bits 16 to 47 name an IPv4 host
+)
+
+// modelEmbeddedIPv4 returns the IPv4 address a NAT64 or 6to4 address embeds.
+func modelEmbeddedIPv4(addr netip.Addr) (netip.Addr, bool) {
+	b := addr.As16()
+	switch {
+	case modelNAT64Prefix.Contains(addr):
+		return netip.AddrFrom4([4]byte(b[12:16])), true
+	case model6to4Prefix.Contains(addr):
+		return netip.AddrFrom4([4]byte(b[2:6])), true
+	}
+	return netip.Addr{}, false
+}
+
+func prefixesContain(prefixes []netip.Prefix, addr netip.Addr) bool {
+	for _, p := range prefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) isBlockedModelAddr(addr netip.Addr, allowPrivate bool) bool {
 	if !addr.IsValid() {
 		return true
 	}
 	addr = addr.Unmap().WithZone("")
+	if v4, ok := modelEmbeddedIPv4(addr); ok {
+		addr = v4
+	}
 	if s != nil && s.allowLoopbackModels && addr.IsLoopback() {
 		return false
 	}
-	if !intercept.IsNonPublicAddr(addr) {
+	shared := prefixesContain(modelSharedPrefixes, addr)
+	if !intercept.IsNonPublicAddr(addr) && !shared && !prefixesContain(modelReservedPrefixes, addr) {
 		return false
 	}
 	if allowPrivate {
-		// Allow-listed self-hosted endpoints may resolve to loopback or RFC1918 /
-		// unique-local private addresses, but never link-local, unspecified,
-		// multicast, or instance-metadata addresses (such as 169.254.169.254 or
-		// fd00:ec2::254).
+		// Allow-listed self-hosted endpoints may resolve to loopback, RFC1918 /
+		// unique-local private addresses, or the shared ranges above, but never
+		// link-local, unspecified, multicast, reserved, or instance-metadata
+		// addresses (such as 169.254.169.254, 100.100.100.200 or fd00:ec2::254).
 		if addr.IsLoopback() {
 			return false
 		}
-		if addr.IsPrivate() && intercept.ValidateExemptionHost(addr.String()) == nil {
+		if (addr.IsPrivate() || shared) && intercept.ValidateExemptionHost(addr.String()) == nil {
 			return false
 		}
 	}
@@ -2546,6 +2641,10 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decode(w, r, &req); err != nil {
 		writeErr(w, 400, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Provider) == "bedrock-gateway" {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "enter the Bedrock model ID manually; this gateway has no model-list endpoint"})
 		return
 	}
 	// Resolve API key: form input > profile stored key. The stored key is only
@@ -2789,7 +2888,9 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body[:min(len(body), 512)]))
+			// The status only: echoing the body would let the caller read what
+			// any host this endpoint can reach answers.
+			lastErr = fmt.Sprintf("API returned %d %s (the response body is not shown)", resp.StatusCode, http.StatusText(resp.StatusCode))
 			continue
 		}
 		// Both OpenAI and Anthropic return {"data": [{"id": "..."},...]}.

@@ -24,6 +24,7 @@ func TestPlannerQuietSkipEdge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _, _ = m.DeleteTask(created.ID, DeleteTaskOptions{}) })
 	tt, ok := m.Task(created.ID)
 	if !ok {
 		t.Fatal("task not found after creation")
@@ -104,6 +105,7 @@ func TestPlannerQuietModeToggleMidRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _, _ = m.DeleteTask(created.ID, DeleteTaskOptions{}) })
 	tt, ok := m.Task(created.ID)
 	if !ok {
 		t.Fatal("task not found")
