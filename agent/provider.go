@@ -15,7 +15,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"iter"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -636,22 +637,23 @@ func logTestConnection(c Config, capt *llmrec.Capture) {
 	attempts := capt.Attempts()
 	if c.Format == FormatBedrockGateway {
 		if len(attempts) == 0 {
-			log.Print("[llm-test] bedrock-gateway — no HTTP request was sent")
+			slog.Warn("[llm-test] bedrock-gateway: no HTTP request was sent")
 			return
 		}
 		for i, a := range attempts {
-			log.Printf("[llm-test] bedrock-gateway — attempt %d/%d HTTP %d", i+1, len(attempts), a.Status)
+			slog.Info("[llm-test] bedrock-gateway attempt", "attempt", i+1, "attempts", len(attempts), "status", a.Status)
 		}
 		return
 	}
 	if len(attempts) == 0 {
-		log.Printf("[llm-test] %s / %s @ %s — no HTTP request was ever sent (config resolution or connection setup failed)",
-			c.Provider(), c.Model, c.BaseURL)
+		slog.Warn("[llm-test] no HTTP request was ever sent (config resolution or connection setup failed)",
+			"provider", c.Provider(), "model", c.Model, "base_url", c.BaseURL)
 		return
 	}
 	for i, a := range attempts {
-		log.Printf("[llm-test] %s / %s @ %s — attempt %d/%d HTTP %d\nresponse body: %s",
-			c.Provider(), c.Model, c.BaseURL, i+1, len(attempts), a.Status, clipBody(a.Body))
+		slog.Info("[llm-test] connection attempt",
+			"provider", c.Provider(), "model", c.Model, "base_url", c.BaseURL,
+			"attempt", i+1, "attempts", len(attempts), "status", a.Status, "response_body", clipBody(a.Body))
 	}
 }
 
@@ -708,14 +710,18 @@ func TestConnection(ctx context.Context, c Config) (time.Duration, string, error
 	// budget to emit OK cleanly (finish=stop).
 	// EscalateMaxTokens stays false: don't raise the cap and retry on truncation, to
 	// avoid burning tokens in a resume loop.
+	probe := &connTestProvider{inner: prov}
 	reply, err := agentcore.Run(ctx, agentcore.Options{
-		Provider:       prov,
+		Provider:       probe,
 		SystemPrompt:   []string{"You are a connection test. Just output the two characters OK — no thinking, no explanation, nothing else."},
 		Tools:          []actool.CoreTool{}, // not nil: nil means the SDK's unconfined file and shell tools
 		PermissionMode: acperm.ModeBypass,
 		MaxTurns:       1,
 		MaxTokens:      8192,
 		NonStreaming:   !c.Stream, // use this profile's real send/receive mode for the connection test
+		// Without this the SDK still adds TaskOutput/TaskStop/TaskList/Monitor, and
+		// some models answer the test with a call to one of them instead of OK.
+		DisableBackgroundTasks: true,
 	}, "ping")
 	lat := time.Since(start)
 	if err != nil {
@@ -727,6 +733,12 @@ func TestConnection(ctx context.Context, c Config) (time.Duration, string, error
 			return lat, "", fmt.Errorf("Bedrock gateway connection failed")
 		}
 		return lat, "", err
+	}
+	// Reject tool-call replies (#526): the connection test asks for plain text
+	// with no tools; a model answering with a tool call or tool_calls/tool_use
+	// finish reason must not be reported as Connected even if it also emitted text.
+	if probe.sawToolCall || isToolCallStopReason(probe.stopReason) {
+		return lat, "", fmt.Errorf("the model returned a tool call instead of a text reply (finish_reason=%q)", probe.stopReason)
 	}
 	// err==nil is not enough: requests that go through while the model emits nothing
 	// at all really happen (thinking burned the whole budget, the body got swallowed
@@ -799,4 +811,52 @@ func withAutoCache(body []byte) ([]byte, bool) {
 		return nil, false
 	}
 	return out, true
+}
+
+// connTestProvider observes the raw provider response during TestConnection so
+// tool-call replies and tool_calls/tool_use stop reasons are rejected (#526).
+type connTestProvider struct {
+	inner       llm.Provider
+	sawToolCall bool
+	stopReason  string
+}
+
+func (p *connTestProvider) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+	return func(yield func(llm.StreamEvent, error) bool) {
+		for ev, err := range p.inner.Stream(ctx, req) {
+			if err == nil {
+				if ev.Type == llm.SEToolUseStart {
+					p.sawToolCall = true
+				}
+				if ev.StopReason != "" {
+					p.stopReason = ev.StopReason
+				}
+			}
+			if !yield(ev, err) {
+				return
+			}
+		}
+	}
+}
+
+func (p *connTestProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	msg, stopReason, usage, err := p.inner.Complete(ctx, req)
+	if err == nil {
+		if len(msg.ToolUses()) > 0 {
+			p.sawToolCall = true
+		}
+		if stopReason != "" {
+			p.stopReason = stopReason
+		}
+	}
+	return msg, stopReason, usage, err
+}
+
+func isToolCallStopReason(stopReason string) bool {
+	switch strings.ToLower(strings.TrimSpace(stopReason)) {
+	case "tool_use", "tool_calls":
+		return true
+	default:
+		return false
+	}
 }

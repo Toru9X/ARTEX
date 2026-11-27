@@ -20,7 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -71,7 +71,7 @@ func (c *Compactor) OnPlannerRound(ctx context.Context, ts *db.ExplorationStore)
 	}
 	round, uncompressed, activeDigests, err := c.maintain(ts)
 	if err != nil {
-		log.Printf("[compaction] maintain exp=%d: %v", ts.ID(), err)
+		slog.Warn("[compaction] maintain failed", "exp", ts.ID(), "err", err)
 		return
 	}
 	needMinor := uncompressed >= c.n
@@ -244,7 +244,7 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 		}
 	}
 	if err := ts.SupersedeDigests(stale); err != nil {
-		log.Printf("[compaction] supersede exp=%d: %v", ts.ID(), err)
+		slog.Warn("[compaction] supersede failed", "exp", ts.ID(), "err", err)
 	}
 	for _, b := range toCreate {
 		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, active))
@@ -258,7 +258,7 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *coldGraph, b block, nodeByID map[int64]*db.Node, cvers map[int64]int, generation int) {
 	body, err := c.compress(ctx, g, b, nodeByID)
 	if err != nil {
-		log.Printf("[compaction] compress exp=%d block=%v: %v", ts.ID(), b.Members, err)
+		slog.Warn("[compaction] compress failed", "exp", ts.ID(), "block", b.Members, "err", err)
 		return
 	}
 	// Re-read fresh state and drop any member that revived while we compressed.
@@ -279,7 +279,7 @@ func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *c
 	final := block{Members: members, Anchors: b.Anchors}
 	payload := digestPayload(body, final, nodeByID, generation, blockSignature(final, cvers))
 	if _, err := ts.AddDigest(payload, members); err != nil {
-		log.Printf("[compaction] add digest exp=%d: %v", ts.ID(), err)
+		slog.Warn("[compaction] add digest failed", "exp", ts.ID(), "err", err)
 	}
 }
 
@@ -537,18 +537,34 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 	return sb.String()
 }
 
+// isThinkingBetweenToolsError reports an Anthropic 400 telling the caller that
+// the model rejects thinking.type="disabled" and requires "between_tools" instead
+// (e.g. Claude Sonnet 5.5, #550).
+func isThinkingBetweenToolsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "between_tools") && strings.Contains(msg, "thinking")
+}
+
 // compress runs the §4 body LLM call on one block. Uses the same model the agent
-// runs on; thinking disabled (a pure summarization step).
+// runs on without forcing thinking.type="disabled" (models such as Claude Sonnet
+// 5.5 reject {"type":"disabled"} with HTTP 400; inheriting the profile's working
+// thinking setting avoids sending an unsupported parameter, #550).
 func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByID map[int64]*db.Node) (string, error) {
 	req := llm.CompletionRequest{
 		System:   []string{compressionSystem},
 		Messages: []llm.Message{llm.UserText(buildCompressionInput(g, b, nodeByID))},
 		// Reasoning models (GLM, DeepSeek) can spend a small cap on hidden reasoning and
-		// return an empty body even with thinking disabled; leave room for both.
+		// return an empty body; leave room for both without forcing thinking="disabled" (#550).
 		MaxTokens: 6000,
-		Thinking:  "disabled",
 	}
 	msg, _, _, err := c.prov.Complete(ctx, req)
+	if err != nil && isThinkingBetweenToolsError(err) {
+		req.Thinking = "between_tools"
+		msg, _, _, err = c.prov.Complete(ctx, req)
+	}
 	if err != nil {
 		return "", err
 	}

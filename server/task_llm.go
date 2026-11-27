@@ -266,7 +266,7 @@ func (r *taskLLMRuntime) currentFor(ctx context.Context) (taskLLMSelection, erro
 	}
 	prov, cfg, id, ok := r.s.globalProviderWithProfile()
 	if !ok {
-		return sel, fmt.Errorf("task %s has no available fallback LLM provider", r.taskID)
+		return sel, fmt.Errorf("task %s has no available fallback LLM provider: %w", r.taskID, agent.ErrGoalDecompositionNoProvider)
 	}
 	sel.provider, sel.retry = prov, cfg.Retry
 	sel.healthProfileID = healthIDFor(prov, id)
@@ -952,7 +952,11 @@ func (s *Server) emitTaskLLMTransition(t *Task, transition db.TaskLLMTransition,
 	}
 	mode := "automatic"
 	kind := "llm_switch"
-	summary := fmt.Sprintf("%s quota exhausted", llmAuditProfileLabel(previous))
+	reasonLabel := "failed consecutive calls"
+	if isQuotaExhaustedError(cause) {
+		reasonLabel = "quota exhausted"
+	}
+	summary := fmt.Sprintf("%s %s", llmAuditProfileLabel(previous), reasonLabel)
 	if transition.NextProfileID != nil {
 		summary += fmt.Sprintf(", subsequent calls switched to %s", llmAuditProfileLabel(next))
 	} else {
