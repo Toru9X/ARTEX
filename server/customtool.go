@@ -228,18 +228,33 @@ func detectPython() string {
 }
 
 // pythonInterpreter resolves the interpreter: user-set > stored auto-detect > live
-// detect. "" only when truly none found.
+// detect. "" only when truly none found. A stored path that does not exist on this
+// host (e.g. a Windows path carried into the Docker image) falls back to detection.
 func (s *Server) pythonInterpreter() string {
-	if v, ok, _ := s.m.pg.GetSetting(settingPythonInterp); ok && strings.TrimSpace(v) != "" {
-		return strings.TrimSpace(v)
+	if v := s.storedPythonInterpreter(); v != "" {
+		return v
 	}
 	return detectPython()
 }
 
+// storedPythonInterpreter returns the stored interpreter when it exists on this
+// host, "" otherwise.
+func (s *Server) storedPythonInterpreter() string {
+	v, ok, _ := s.m.pg.GetSetting(settingPythonInterp)
+	v = strings.TrimSpace(v)
+	if !ok || v == "" {
+		return ""
+	}
+	if _, err := os.Stat(v); err != nil {
+		return ""
+	}
+	return v
+}
+
 // seedPythonInterpreter stores the auto-detected interpreter on startup if unset
-// (never clobbers a user-set value).
+// or pointing at a path missing on this host (never clobbers a working value).
 func (s *Server) seedPythonInterpreter() {
-	if v, ok, _ := s.m.pg.GetSetting(settingPythonInterp); ok && strings.TrimSpace(v) != "" {
+	if s.storedPythonInterpreter() != "" {
 		return
 	}
 	if p := detectPython(); p != "" {

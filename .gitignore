@@ -86,3 +86,11 @@ artex-run.log
 service-account-sa-trungnd66-test.md
 *_ed25519_private.pem
 *~
+
+# local Docker switch: compose override and backups of .env / keys (secrets)
+docker-compose.override.yml
+.env.bak-*
+/keys.bak-*/
+
+# exported ARTEX MITM CA (local only)
+artex-ca.cer

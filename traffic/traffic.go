@@ -358,6 +358,17 @@ func Open(dir, addr string) (*Traffic, error) {
 		db.Close()
 		return nil, fmt.Errorf("restrict the MITM CA key: %w", err)
 	}
+	// ...but "stays readable" was only ever an assumption: go-mitmproxy creates
+	// the cert with os.Create too, so a restrictive umask (0077 in the Docker
+	// image) leaves it 0600 and root-owned. Every agent tool runs under the
+	// dropped exec uid with SSL_CERT_FILE pointing here (agent/worker.go), so an
+	// unreadable cert breaks every TLS client they launch — semgrep, curl, python
+	// and node alike — with a bare "permission denied". The cert is public by
+	// definition; enforce that it is readable instead of assuming it.
+	if err := os.Chmod(t.CACertPath(), 0o644); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("make the MITM CA certificate readable: %w", err)
+	}
 	// Upstream selection. By default (no global egress proxy set) targets are
 	// dialed DIRECTLY: go-mitmproxy's own default upstream uses
 	// http.ProxyFromEnvironment, so an HTTP_PROXY/HTTPS_PROXY in the environment

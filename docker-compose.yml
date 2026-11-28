@@ -95,8 +95,6 @@ services:
       # skill changes require no image rebuild — the container reads the host copy.
       - ./skills:/app/skills
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
     # Chromium needs more than Docker's default 64 MB /dev/shm to prevent tab crashes.
     shm_size: "1gb"
     tmpfs:
